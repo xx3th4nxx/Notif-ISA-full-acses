@@ -1,0 +1,8 @@
+streamlit
+requests
+websocket-client
+websocket
+yfinance
+pandas
+python-dotenv
+google-genai

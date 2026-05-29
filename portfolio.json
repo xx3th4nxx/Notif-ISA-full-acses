@@ -1,0 +1,56 @@
+[
+  {
+    "symbol": "AIAI.L", 
+    "currency": "GBP",
+    "sell_target_native": 45.00, 
+    "dca_trigger_native": 25.00,
+    "trailing_percent": 5.0, 
+    "buy_price_in_gbp": 24.3345,
+    "shares": 1.72922998
+  },
+  {
+    "symbol": "VUSA.L", 
+    "currency": "GBP",
+    "sell_target_native": 120.00, 
+    "dca_trigger_native": 90.00,
+    "trailing_percent": 5.0, 
+    "buy_price_in_gbp": 97.7101,
+    "shares": 0.14737478
+  },
+  {
+    "symbol": "MU", 
+    "currency": "USD",
+    "sell_target_native": 1000.00, 
+    "dca_trigger_native": 650.00,
+    "trailing_percent": 5.0, 
+    "buy_price_in_gbp": 679.16,
+    "shares": 0.01850826
+  },
+  {
+    "symbol": "AVGO", 
+    "currency": "USD",
+    "sell_target_native": 500.00, 
+    "dca_trigger_native": 380.00,
+    "trailing_percent": 5.0, 
+    "buy_price_in_gbp": 306.72,
+    "shares": 0.03416797
+  },
+  {
+    "symbol": "GOOGL", 
+    "currency": "USD",
+    "sell_target_native": 450.00, 
+    "dca_trigger_native": 350.00,
+    "trailing_percent": 5.0, 
+    "buy_price_in_gbp": 289.30,
+    "shares": 0.02329770
+  },
+  {
+    "symbol": "ORCL", 
+    "currency": "USD",
+    "sell_target_native": 250.00, 
+    "dca_trigger_native": 170.00,
+    "trailing_percent": 5.0, 
+    "buy_price_in_gbp": 143.22,
+    "shares": 0.03484246
+  }
+]
