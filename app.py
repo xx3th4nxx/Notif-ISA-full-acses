@@ -776,3 +776,46 @@ if st.button("🔴 Simulate Emergency Bearish Event (NVDA Test)", width="stretch
         # Manually route it through your upgraded news engine
         analyze_news(test_headline, "NVDA", shared_state)
         st.success("Simulation sent! Check your system logs below and your phone.")
+
+st.markdown("---")
+st.markdown("#### 🕵️ Trading 212 Diagnostic Tool")
+
+if st.button("Run Network Diagnostics", width="stretch"):
+    with st.spinner("Pinging Trading 212 servers..."):
+        # 1. Fetch credentials exactly as the main loop does
+        api_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
+        api_secret = os.getenv("T212_API_SECRET") or st.secrets.get("T212_API_SECRET")
+
+        # 2. Define both API environments
+        urls = {
+            "Live Environment": "https://live.trading212.com/api/v0/equity/portfolio",
+            "Demo Environment": "https://demo.trading212.com/api/v0/equity/portfolio",
+        }
+        # 3. Test the connection
+        for env, url in urls.items():
+            st.write(f"**Testing {env}...**")
+            try:
+                res = requests.get(url, auth=(api_key, api_secret), timeout=10)
+                status = res.status_code
+
+                if status == 200:
+                    st.success(
+                        f"✅ Success! Your keys are perfectly valid for the {env}."
+                    )
+                elif status == 401:
+                    st.error(
+                        f"❌ 401 Unauthorized ({env}): Your keys are incorrect, OR you did not check all the permission boxes in the T212 app."
+                    )
+                elif status == 403:
+                    st.error(
+                        f"❌ 403 Forbidden ({env}): You are locked out. Check if you accidentally enabled IP whitelisting in your T212 settings."
+                    )
+                elif status == 429:
+                    st.warning(
+                        f"⚠️ 429 Too Many Requests ({env}): You are hitting the API too fast. Wait a minute for the rate limit to reset."
+                    )
+                else:
+                    st.error(f"⚠️ Unhandled Error {status}: {res.text}")
+
+            except Exception as e:
+                st.error(f"Network Failure: {e}")
