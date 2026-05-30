@@ -10,8 +10,6 @@ import yfinance as yf
 from groq import Groq
 import json
 
-st.write("🔍 **Total Secrets Found:**", len(st.secrets))
-
 st.set_page_config(page_title="ISA Trading Bot", layout="wide", page_icon="📈")
 
 # --- 1. CONFIGURATION & SECRETS ---
@@ -588,18 +586,30 @@ with col1:
         st.text_input("Add new symbol:", placeholder="e.g. AAPL").strip().upper()
     )
 with col2:
-    st.write("")  # Spacing to align with the text box
+    st.write("")
     st.write("")
     if st.button("➕ Add", key="add_btn", width="stretch"):
         if new_symbol:
-            # Safely handle if you paste multiple separated by commas
-            for t in new_symbol.replace("\n", ",").split(","):
-                clean_t = t.strip().upper()
-                if clean_t and clean_t not in shared_state.custom_watchlist:
-                    shared_state.custom_watchlist.append(clean_t)
-            save_watchlist(shared_state.custom_watchlist)
-            send_ntfy("📝 Watchlist Updated", f"Added {new_symbol} to tracking list.")
-            st.rerun()
+            # --- VALIDATION ENGINE ---
+            with st.spinner(f"Verifying {new_symbol}..."):
+                ticker = yf.Ticker(new_symbol)
+                # We check 'longName' because invalid tickers return an empty dict or None
+                if ticker.info.get("longName"):
+                    if new_symbol not in shared_state.custom_watchlist:
+                        shared_state.custom_watchlist.append(new_symbol)
+                        save_watchlist(shared_state.custom_watchlist)
+                        st.success(f"Added {new_symbol}!")
+                        send_ntfy(
+                            "📝 Watchlist Updated", f"Added {new_symbol} to tracking."
+                        )
+                        st.rerun()
+                    else:
+                        st.warning("Stock already in list.")
+                else:
+                    # This triggers if the ticker is fake/invalid
+                    st.error(
+                        f"❌ '{new_symbol}' is not a valid stock ticker. Please try again."
+                    )
 
 # --- 2. THE REMOVE BUTTONS ---
 st.write("**Currently Tracking:**")
