@@ -156,15 +156,18 @@ def get_reinvestment_advice(portfolio, watchlist, state):
     prompt = (
         f"My current profitable stock holdings are: {portfolio_summary}. "
         f"My current watchlist for buying is: {watchlist_summary}. "
-        "Act as a ruthless, strategic trading assistant. 1. Tell me exactly which stock to take profit from and what percentage of those shares to sell. "
-        "2. Recommend exactly which stock from my watchlist I should roll that cash into, or if I should hold cash. Keep the response to 3-4 punchy, actionable sentences."
+        "Act as a ruthless, strategic trading assistant handling fractional shares. "
+        "STRICT RULES: "
+        "1. ONLY recommend 'skimming the profit'. Tell me to sell the exact monetary value of the profit, leaving the principal investment perfectly intact. "
+        "2. EXCEPTION: You may recommend selling 100% of a holding ONLY IF the stock is performing poorly OR it is highly strategic to rotate all that capital into a specific watchlist stock. "
+        "3. Tell me exactly which watchlist stock to roll the money into. Keep the response to 3 punchy, actionable sentences."
     )
 
     try:
         chat = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.3-70b-versatile",
-            temperature=0.3,
+            temperature=0.2,
         )
         state.daily_ai_calls += 1
         return chat.choices[0].message.content.strip()
@@ -224,13 +227,10 @@ def analyze_news(headline, symbol, state):
         log_event(
             state, f"BLOCKED: Groq daily limit reached. Skipping AI for {symbol}."
         )
-        return
+        return False
 
     if headline in state.processed_headlines:
-        print(
-            f"[{get_timestamp()}] [GATEKEEPER] BLOCKED: Already analyzed '{headline}' today."
-        )
-        return
+        return False
 
     print(f"[{get_timestamp()}] [GATEKEEPER] Inspecting: '{headline}' for {symbol}")
     keywords = [
@@ -249,20 +249,16 @@ def analyze_news(headline, symbol, state):
         "ai",
         "revenue",
     ]
-    is_actionable = any(word in headline.lower() for word in keywords)
 
+    # --- FIXED: The Gatekeeper Block ---
+    is_actionable = any(word in headline.lower() for word in keywords)
     if not is_actionable:
-        print(f"[{get_timestamp()}] [GATEKEEPER] REJECTED: No keywords found.")
         state.processed_headlines.add(headline)
-        return
+        return False
+    # -----------------------------------
 
     print(f"[{get_timestamp()}] [GATEKEEPER] APPROVED: Sending to Groq API...")
-    prompt = (
-        f"Analyze this market-moving headline: '{headline}' for {symbol}. "
-        f"1. State clearly if this is a BUY, SELL, or HOLD. "
-        f"2. Suggest whether the user should use a 'Limit Order' or a 'Stop-Limit Order' to execute this, based on the expected market volatility of the news. "
-        f"Keep it to 2 short sentences. maximum 5 sentences."
-    )
+    prompt = f"Analyze this market-moving headline: '{headline}' for {symbol}. 1. State clearly if this is a BUY, SELL, or HOLD. 2. Suggest whether the user should use a 'Limit Order' or a 'Stop-Limit Order'. Keep it to 2-5 short sentences."
 
     try:
         chat_completion = groq_client.chat.completions.create(
@@ -271,15 +267,17 @@ def analyze_news(headline, symbol, state):
             temperature=0.2,
         )
         ai_response_text = chat_completion.choices[0].message.content.strip()
-
         state.daily_ai_calls += 1
         log_event(state, f"RAW GROQ RESPONSE: {ai_response_text}")
         send_ntfy(f"🚨 {symbol} ACTIONABLE NEWS", ai_response_text)
         state.processed_headlines.add(headline)
 
+        return True  # <--- Triggers the reinvestment strategy
+
     except Exception as e:
         log_event(state, f"AI CRASH: \n{traceback.format_exc()}", is_error=True)
         send_ntfy(f"⚠️ Skimmer AI Failed: {symbol}", f"Error: {str(e)}")
+        return False
 
 
 # --- 4. BACKGROUND ENGINES ---
@@ -538,6 +536,25 @@ if watchlist_input is not None:
         )
 
         st.rerun()
+
+        st.markdown("---")
+st.markdown("#### 📊 Live Portfolio Holdings")
+st.dataframe(MY_PORTFOLIO, use_container_width=True)
+
+st.markdown("---")
+st.markdown("#### 🧠 AI Profit Skimmer & Reinvestment Strategy")
+st.caption(
+    "Analyzes your live T212 profits and your Discovery Watchlist to suggest capital rotation."
+)
+
+if st.button("Calculate Reinvestment Strategy", use_container_width=True):
+    with st.spinner("AI is analyzing your live profits and watchlist targets..."):
+        advice = get_reinvestment_advice(
+            MY_PORTFOLIO, shared_state.custom_watchlist, shared_state
+        )
+        st.success("Strategy Generated!")
+        st.info(advice)
+        send_ntfy("🧠 Reinvestment Strategy", advice)
 
 st.markdown("---")
 st.markdown("#### 🧠 AI Profit Skimmer & Reinvestment Strategy")
