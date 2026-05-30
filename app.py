@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 import yfinance as yf
 from groq import Groq
 import json
+import sqlite3
+import pandas as pd
 
 st.set_page_config(page_title="ISA Trading Bot", layout="wide", page_icon="📈")
 
@@ -60,6 +62,31 @@ def save_watchlist(watchlist):
         json.dump(watchlist, f)
 
 
+def init_db():
+    conn = sqlite3.connect("bot_brain.db", check_same_thread=False)
+    c = conn.cursor()
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS ai_decisions
+                 (timestamp TEXT, symbol TEXT, action TEXT, confidence INTEGER, profit REAL, reason TEXT)"""
+    )
+    conn.commit()
+    conn.close()
+
+
+def log_ai_decision(symbol, action, confidence, profit, reason):
+    try:
+        conn = sqlite3.connect("bot_brain.db", timeout=10)
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO ai_decisions VALUES (?, ?, ?, ?, ?, ?)",
+            (get_timestamp(), symbol, action, int(confidence), float(profit), reason),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[{get_timestamp()}] [DB ERROR] Failed to log decision: {e}")
+
+
 # --- 2. GLOBAL SHARED STATE ---
 @st.cache_resource
 def get_shared_state():
@@ -84,6 +111,8 @@ def get_shared_state():
 
 
 shared_state = get_shared_state()
+shared_state = get_shared_state()
+init_db()
 
 
 # --- 3. CORE FUNCTIONS (Top Level - Zero Indentation) ---
@@ -253,6 +282,29 @@ def evaluate_harvest_timing(symbol, profit, state):
         )
 
 
+def is_earnings_imminent(symbol):
+    """Checks if earnings are scheduled within the next 48 hours."""
+    try:
+        ticker = yf.Ticker(symbol)
+        cal = ticker.calendar
+
+        if isinstance(cal, dict) and "Earnings Date" in cal:
+            dates = cal["Earnings Date"]
+            if dates and len(dates) > 0:
+                # Extract the next upcoming date
+                next_earnings = dates[0].date()
+                days_away = (next_earnings - datetime.now().date()).days
+
+                # Trigger freeze if report is today, tomorrow, or the day after
+                if 0 <= days_away <= 2:
+                    return True, days_away
+    except Exception:
+        # Fail gracefully if data is missing; do not crash the main thread
+        pass
+
+    return False, -1
+
+
 def log_event(state, message, is_error=False):
     timestamp = get_timestamp()
     prefix = "[ERROR]" if is_error else "[SYSTEM]"
@@ -411,30 +463,40 @@ REASONING: [2-5 short sentences explaining why, and suggesting a Limit or Stop-L
 
 
 def get_market_regime():
+    """Pulls live VIX data from Yahoo Finance to determine institutional fear levels."""
     try:
-        data = yf.Ticker("VUSA.L").history(period="60d")
-        if data.empty:
-            return "NEUTRAL_CHOPPY"
-        current_price = data["Close"].iloc[-1]
-        ma50 = data["Close"].rolling(window=50).mean().iloc[-1]
-        volatility = data["Close"].pct_change().std()
+        # Fast info is lighter and faster than pulling historical history
+        vix_price = yf.Ticker("^VIX").fast_info["lastPrice"]
 
-        if current_price < ma50 and volatility > 0.015:
-            return "BEARISH_PANIC"
-        elif current_price > ma50:
-            return "BULLISH_GROWTH"
-    except:
-        pass
-    return "NEUTRAL_CHOPPY"
+        if vix_price >= 30.0:
+            return "BUNKER_MODE", vix_price
+        elif vix_price >= 20.0:
+            return "ELEVATED_RISK", vix_price
+        else:
+            return "NORMAL", vix_price
+    except Exception as e:
+        # Failsafe: If Yahoo Finance is offline, default to neutral
+        return "NORMAL", 0.0
 
 
 def get_dynamic_params(regime, base_strategy):
+    """Adjusts your risk parameters on the fly based on the VIX regime."""
     params = STRATEGIES.get(base_strategy, STRATEGIES["GROWTH"]).copy()
-    if regime == "BEARISH_PANIC":
-        params["stop_multiplier"] = 4.5
-        params["harvest_threshold"] = params["harvest_threshold"] * 2
-    elif regime == "BULLISH_GROWTH":
-        params["stop_multiplier"] = 2.0
+
+    if regime == "BUNKER_MODE":
+        # Total defense: microscopic stops, hyper-aggressive harvesting
+        params["stop_multiplier"] = 0.5
+        params["harvest_threshold"] = 2.0
+        params["status"] = "🚨 BUNKER MODE"
+    elif regime == "ELEVATED_RISK":
+        # Caution: tighter stops, quicker harvesting
+        params["stop_multiplier"] = 1.5
+        params["harvest_threshold"] = params["harvest_threshold"] * 0.5
+        params["status"] = "⚠️ CAUTION"
+    else:
+        # Risk-on: Standard user-defined parameters
+        params["status"] = "🟢 NORMAL"
+
     return params
 
 
@@ -521,7 +583,15 @@ def master_patrol(state):
                     combined_portfolio.append({"symbol": t})
 
             # 2. Get the market status ONCE (Unindented out of the loop above)
-            market_regime = get_market_regime()
+            market_regime, current_vix = get_market_regime()
+
+            # If the market is panicking, log it and alert the phone exactly once per cycle
+            if market_regime == "BUNKER_MODE":
+                log_event(
+                    state,
+                    f"MACRO ALERT: VIX spiked to {current_vix:.2f}. BUNKER MODE ENGAGED.",
+                    is_error=True,
+                )
 
             # 3. Loop through your positions with clean alignment
             for item in combined_portfolio:
@@ -594,13 +664,32 @@ def master_patrol(state):
                         symbol = p["symbol"]
                         profit = p["profit"]
 
-                        # Ask the AI if we should actually sell right now, AND get the confidence score
-                        should_sell, confidence, reason = evaluate_harvest_timing(
-                            symbol, profit, state
-                        )
+                        # --- EARNINGS FREEZE PROTOCOL ---
+                        earnings_imminent, days_away = is_earnings_imminent(symbol)
+
+                        if earnings_imminent:
+                            # Override the AI: Force a hold and maximize confidence
+                            should_sell = False
+                            confidence = 100
+                            reason = f"EARNINGS FREEZE: Corporate report drops in {days_away} days. Holding capital for volatility play."
+                            log_event(
+                                state, f"🛡️ Earnings Freeze activated for {symbol}."
+                            )
+                        else:
+                            # If no earnings are pending, ask the AI to evaluate standard momentum
+                            should_sell, confidence, reason = evaluate_harvest_timing(
+                                symbol, profit, state
+                            )
+                        # --------------------------------
+
+                        # --- SQLITE LOGGING HOOK ---
+                        action_str = "HARVEST" if should_sell else "HOLD"
+                        log_ai_decision(symbol, action_str, confidence, profit, reason)
+                        # ---------------------------
+
                         log_event(
                             state,
-                            f"AI Harvest Decision for {symbol}: {reason} (Confidence: {confidence}%)",
+                            f"AI Decision Logged -> {symbol}: {action_str} ({confidence}%)",
                         )
 
                         if should_sell:
@@ -670,7 +759,22 @@ if not shared_state.price_thread_running:
 st.title("📈 Notif-ISA Trading Bot")
 st.markdown("---")
 st.subheader("⚙️ Bot Control Panel")
-
+# --- MACRO VIX DISPLAY ---
+try:
+    live_vix = yf.Ticker("^VIX").fast_info["lastPrice"]
+    if live_vix >= 30:
+        vix_color = "🔴"
+        vix_status = "BUNKER MODE ENGAGED"
+    elif live_vix >= 20:
+        vix_color = "🟠"
+        vix_status = "ELEVATED RISK"
+    else:
+        vix_color = "🟢"
+        vix_status = "NORMAL"
+    st.caption(f"{vix_color} **Global Macro VIX:** {live_vix:.2f} — {vix_status}")
+except:
+    pass
+# -------------------------
 calls_made = shared_state.daily_ai_calls
 calls_remaining = 500 - calls_made
 st.progress(
@@ -906,6 +1010,26 @@ if st.button("🔔 Send Manual Test Notification", width="stretch"):
         st.success(f"Signal fired successfully! Server responded: {details}")
     else:
         st.error(f"Signal failed! Error details: {details}")
+
+st.markdown("---")
+st.markdown("#### 🧠 AI Decision Ledger (Quantitative Tracker)")
+st.caption(
+    "A permanent record of every HARVEST/HOLD decision made by the AI. Use this to track accuracy over time."
+)
+
+try:
+    conn = sqlite3.connect("bot_brain.db")
+    df = pd.read_sql_query(
+        "SELECT * FROM ai_decisions ORDER BY timestamp DESC LIMIT 50", conn
+    )
+    conn.close()
+
+    if not df.empty:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.info("The ledger is currently empty. Waiting for the first AI decision...")
+except Exception as e:
+    st.error(f"Could not load ledger: {e}")
 
 st.markdown("---")
 st.subheader("🖥️ System Logs & Live Events")
