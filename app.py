@@ -78,6 +78,7 @@ def get_shared_state():
             self.auto_harvest_active = False
             self.harvest_threshold = 10.0
             self.last_harvest_date = None
+            self.per_stock_thresholds = {}
 
     return SharedState()
 
@@ -213,6 +214,43 @@ def get_reinvestment_advice(portfolio, watchlist, state):
         return chat.choices[0].message.content.strip()
     except Exception as e:
         return f"Error contacting AI: {str(e)}"
+
+
+def evaluate_harvest_timing(symbol, profit, state):
+    if state.daily_ai_calls >= 500:
+        return True, "API limit reached. Defaulting to safe harvest."
+
+    try:
+        # 1. Fetch live context to make an informed decision
+        url = f"https://finnhub.io/api/v1/company-news?symbol={symbol}&from={datetime.now().strftime('%Y-%m-%d')}&to={datetime.now().strftime('%Y-%m-%d')}&token={FINNHUB_KEY}"
+        news = requests.get(url, timeout=5).json()
+        headline = (
+            news[0]["headline"]
+            if (isinstance(news, list) and len(news) > 0)
+            else "No recent news available."
+        )
+
+        # 2. Force the AI into a binary choice
+        prompt = f"I am up £{profit} on {symbol}. The latest news today is: '{headline}'. As a ruthless trading bot, should I 'HARVEST' these profits now before it drops, or 'HOLD' to let it ride higher? Answer with exactly one word (HARVEST or HOLD), followed by a 1-sentence reason."
+
+        chat = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.2,
+        )
+        state.daily_ai_calls += 1
+        response = chat.choices[0].message.content.strip()
+
+        # 3. Parse the verdict
+        if response.upper().startswith("HOLD"):
+            return False, response
+        return True, response
+
+    except Exception as e:
+        return (
+            True,
+            f"HARVEST: Error analyzing timing ({e}), defaulting to secure profits.",
+        )
 
 
 def log_event(state, message, is_error=False):
@@ -489,27 +527,64 @@ def master_patrol(state):
                             send_ntfy(f"⚠️ Brief Failed: {symbol}", f"Error: {str(e)}")
                     last_brief_date = now.date()
 
-            # --- 🌾 AUTO-HARVESTER ENGINE ---
+            # --- 🌾 AUTO-HARVESTER ENGINE WITH PER-STOCK OVERRIDES ---
             if state.auto_harvest_active and now.date() != state.last_harvest_date:
-                # Look for any stock that crossed the user's profit threshold
-                ripe_profits = [
-                    p
-                    for p in combined_portfolio
-                    if p.get("profit", 0) >= state.harvest_threshold
-                ]
+                # Ensure the dictionary is initialized safely background-side
+                if not hasattr(state, "per_stock_thresholds"):
+                    state.per_stock_thresholds = {}
+
+                ripe_profits = []
+                for p in combined_portfolio:
+                    symbol = p.get("symbol")
+                    profit = p.get("profit", 0)
+
+                    # Dynamic threshold matching: Check specific override map, then fall back to global
+                    specific_threshold = state.per_stock_thresholds.get(
+                        symbol, state.harvest_threshold
+                    )
+
+                    if profit >= specific_threshold:
+                        ripe_profits.append(p)
 
                 if ripe_profits:
-                    log_event(state, f"Harvester Triggered! Ripe profits found.")
-                    advice = get_reinvestment_advice(
-                        combined_portfolio, state.custom_watchlist, state
+                    log_event(
+                        state, "Harvester Triggered! AI is evaluating exit momentum..."
                     )
 
-                    send_ntfy(
-                        "🌾 Auto-Harvester Alert!",
-                        f"A holding crossed your £{state.harvest_threshold} profit line.\n\nAI Advice:\n{advice}",
-                    )
+                    harvest_candidates = []
+                    for p in ripe_profits:
+                        symbol = p["symbol"]
+                        profit = p["profit"]
 
-                    # Lock the engine for the rest of the day so it doesn't spam your phone
+                        # Ask the AI if we should actually sell right now
+                        should_sell, reason = evaluate_harvest_timing(
+                            symbol, profit, state
+                        )
+                        log_event(state, f"AI Harvest Decision for {symbol}: {reason}")
+
+                        if should_sell:
+                            harvest_candidates.append(p)
+                            send_ntfy(
+                                f"✂️ {symbol} Profit Harvest",
+                                f"Decision: HARVEST.\nReason: {reason}",
+                            )
+                        else:
+                            send_ntfy(
+                                f"💎 {symbol} Diamond Hands",
+                                f"Decision: HOLD.\nReason: {reason}",
+                            )
+
+                    # Only generate reinvestment advice for the stocks we actually decided to sell
+                    if harvest_candidates:
+                        advice = get_reinvestment_advice(
+                            harvest_candidates, state.custom_watchlist, state
+                        )
+                        send_ntfy(
+                            "🌾 Auto-Harvester Reinvestment",
+                            f"AI Advice for rotated capital:\n{advice}",
+                        )
+
+                    # Lock the engine for the day to prevent spam
                     state.last_harvest_date = now.date()
 
             if state.skimmer_active:
@@ -729,6 +804,37 @@ if shared_state.custom_watchlist:
 else:
     st.info("Your watchlist is currently empty.")
     # (Removed the rogue st.rerun() that was causing the infinite loop!)
+
+st.markdown("### 🎯 Per-Stock Harvest Thresholds")
+with st.expander("Configure Individual Position Targets", expanded=False):
+    st.caption("Leave at default to use your global strategy profile threshold.")
+
+    # Safely ensure the dictionary exists in state
+    if not hasattr(shared_state, "per_stock_thresholds"):
+        shared_state.per_stock_thresholds = {}
+
+    # Generate an independent slider for every active holding
+    for item in MY_PORTFOLIO:
+        symbol = item["symbol"]
+        current_profit = item["profit"]
+
+        # Determine baseline default starting position
+        default_val = float(shared_state.harvest_threshold)
+        saved_val = shared_state.per_stock_thresholds.get(symbol, default_val)
+
+        # Ensure slider boundaries contain the current state gracefully
+        max_slider_bound = max(50.0, float(current_profit) * 2.0)
+
+        val = st.slider(
+            label=f"{symbol} Target (Current Profit: £{current_profit:,.2f})",
+            min_value=0.0,
+            max_value=float(max_slider_bound),
+            value=float(saved_val),
+            step=0.5,
+            key=f"thresh_{symbol}",
+        )
+        # Record the setting
+        shared_state.per_stock_thresholds[symbol] = val
 
 st.markdown("---")
 st.markdown("#### 📊 Live Portfolio Holdings")
