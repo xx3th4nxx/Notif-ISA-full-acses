@@ -92,12 +92,22 @@ def send_ntfy(title, message):
 
 @st.cache_data(ttl=3600)
 def get_portfolio_from_t212():
-    api_key_id = os.getenv("T212_API_KEY_ID") or st.secrets.get("T212_API_KEY_ID")
-    api_secret = os.getenv("T212_API_SECRET") or st.secrets.get("T212_API_SECRET")
+    # Trading 212 uses a single API token. This checks for it safely.
+    api_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
+    if not api_key:
+        api_key = os.getenv("T212_API_KEY_ID") or st.secrets.get("T212_API_KEY_ID")
+
+    if not api_key:
+        st.error(
+            "🚨 API Key Missing! Please add your Trading 212 API key to Streamlit secrets."
+        )
+        return []
+
     url = "https://live.trading212.com/api/v0/equity/portfolio"
+    headers = {"Authorization": api_key}
 
     try:
-        response = requests.get(url, auth=(api_key_id, api_secret), timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             print(f"[{get_timestamp()}] [SYSTEM] T212 Portfolio Sync Successful!")
             clean_portfolio = []
@@ -111,27 +121,25 @@ def get_portfolio_from_t212():
                 else:
                     clean_ticker = raw_ticker.replace("_EQ", "")
 
-                # Extract the new financial data
                 clean_portfolio.append(
                     {
                         "symbol": clean_ticker,
                         "shares": item.get("quantity", 0),
                         "avg_price": item.get("averagePrice", 0),
                         "current_price": item.get("currentPrice", 0),
-                        "profit": item.get("ppl", 0),  # Live Profit/Loss
+                        "profit": item.get("ppl", 0),
                     }
                 )
             return clean_portfolio
         else:
-            print(f"[{get_timestamp()}] [SYSTEM] T212 Error: {response.text}")
+            # This forces the REAL error to show up on your dashboard!
+            st.error(
+                f"🚨 T212 Connection Rejected! Status {response.status_code}: {response.text}"
+            )
+            return []
     except Exception as e:
-        print(f"[{get_timestamp()}] [SYSTEM] T212 Fetch Failed: {e}")
-
-    # Fallback data if API crashes
-    return [
-        {"symbol": "MU", "shares": 10, "profit": 25.50},
-        {"symbol": "AVGO", "shares": 5, "profit": 150.00},
-    ]
+        st.error(f"🚨 Network Error: {e}")
+        return []
 
 
 MY_PORTFOLIO = get_portfolio_from_t212()
