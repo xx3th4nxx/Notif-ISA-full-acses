@@ -1,0 +1,13 @@
+# Ignore Streamlit secrets
+.streamlit/
+
+# Ignore personal portfolio data
+portfolio.json
+
+watchlist.json
+
+# Standard Python ignores
+__pycache__/
+*.pyc
+.env
+
