@@ -765,3 +765,14 @@ else:
 
 if st.button("🔄 Refresh Logs", key="force_refresh_logs_btn", width="stretch"):
     st.rerun()
+
+st.markdown("---")
+st.markdown("#### 🧪 Strategy Simulation")
+if st.button("🔴 Simulate Emergency Bearish Event (NVDA Test)", width="stretch"):
+    with st.spinner("Injecting panic event into skimmer pipeline..."):
+        # Simulated high-impact bearish headline
+        test_headline = "Nvidia faces severe hardware supply chain bottlenecks and sudden regulatory fines."
+
+        # Manually route it through your upgraded news engine
+        analyze_news(test_headline, "NVDA", shared_state)
+        st.success("Simulation sent! Check your system logs below and your phone.")
