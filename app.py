@@ -557,15 +557,6 @@ if st.button(
         st.info(advice)
         send_ntfy("🧠 Reinvestment Strategy", advice)
 
-if st.button("Calculate Reinvestment Strategy", use_container_width=True):
-    with st.spinner("AI is analyzing your live profits and watchlist targets..."):
-        advice = get_reinvestment_advice(
-            MY_PORTFOLIO, shared_state.custom_watchlist, shared_state
-        )
-        st.success("Strategy Generated!")
-        st.info(advice)
-        send_ntfy("🧠 Reinvestment Strategy", advice)
-
 st.markdown("---")
 st.markdown("#### 🛠️ Diagnostics")
 if st.button("🔔 Send Manual Test Notification"):
