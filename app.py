@@ -488,6 +488,12 @@ if watchlist_input is not None:
     if new_watchlist != shared_state.custom_watchlist:
         shared_state.custom_watchlist = new_watchlist
         save_watchlist(new_watchlist)
+
+        send_ntfy(
+            "📝 Watchlist Merged",
+            f"Now tracking {len(new_watchlist)} custom stocks alongside your main T212 portfolio.",
+        )
+
         st.rerun()
 
 st.markdown("---")
