@@ -113,26 +113,20 @@ def send_ntfy(title, message):
 
 @st.cache_data(ttl=3600)
 def get_portfolio_from_t212():
-    # 1. Fetch BOTH the Key and the Secret
+    # 1. Fetch ONLY the API Key
     api_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
-    api_secret = os.getenv("T212_API_SECRET") or st.secrets.get("T212_API_SECRET")
 
-    # Fallback in case you still have the old variable names
     if not api_key:
-        api_key = os.getenv("T212_API_KEY_ID") or st.secrets.get("T212_API_KEY_ID")
-
-    if not api_key or not api_secret:
-        st.error(
-            "🚨 Missing Keys! Ensure both T212_API_KEY and T212_API_SECRET are in your secrets."
-        )
+        st.error("🚨 Missing Key! Ensure T212_API_KEY is in your secrets.")
         return []
 
-    # 2. Toggle Environment (Live vs Demo)
+    # 2. Define the URL and headers BEFORE opening the try block
     url = "https://live.trading212.com/api/v0/equity/portfolio"
+    headers = {"Authorization": api_key}
 
     try:
-        # 3. Python 'requests' handles the Basic Auth base64 encoding automatically!
-        response = requests.get(url, auth=(api_key, api_secret), timeout=10)
+        # 3. Fire the request with the new raw header format
+        response = requests.get(url, headers=headers, timeout=10)
 
         if response.status_code == 200:
             print(f"[{get_timestamp()}] [SYSTEM] T212 Sync Successful!")
@@ -159,6 +153,8 @@ def get_portfolio_from_t212():
                 f"🚨 T212 Blocked You! Status {response.status_code}: {response.text}"
             )
             return []
+
+    # 4. This is the except block Python was looking for!
     except Exception as e:
         st.error(f"🚨 Network Error: {e}")
         return []
