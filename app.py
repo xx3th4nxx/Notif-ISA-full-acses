@@ -10,10 +10,7 @@ import yfinance as yf
 from groq import Groq
 import json
 
-st.write(
-    "🔍 **Diagnostic Check:** Does the app see the secret? ",
-    "T212_API_KEY" in st.secrets,
-)
+st.write("🔍 **Total Secrets Found:**", len(st.secrets))
 
 st.set_page_config(page_title="ISA Trading Bot", layout="wide", page_icon="📈")
 
@@ -61,6 +58,9 @@ def get_shared_state():
             self.price_thread_running = False
             self.logs = []
             self.custom_watchlist = load_watchlist()
+            self.auto_harvest_active = False
+            self.harvest_threshold = 10.0
+            self.last_harvest_date = None
 
     return SharedState()
 
@@ -388,6 +388,29 @@ def master_patrol(state):
                             send_ntfy(f"⚠️ Brief Failed: {symbol}", f"Error: {str(e)}")
                     last_brief_date = now.date()
 
+            # --- 🌾 AUTO-HARVESTER ENGINE ---
+            if state.auto_harvest_active and now.date() != state.last_harvest_date:
+                # Look for any stock that crossed the user's profit threshold
+                ripe_profits = [
+                    p
+                    for p in combined_portfolio
+                    if p.get("profit", 0) >= state.harvest_threshold
+                ]
+
+                if ripe_profits:
+                    log_event(state, f"Harvester Triggered! Ripe profits found.")
+                    advice = get_reinvestment_advice(
+                        combined_portfolio, state.custom_watchlist, state
+                    )
+
+                    send_ntfy(
+                        "🌾 Auto-Harvester Alert!",
+                        f"A holding crossed your £{state.harvest_threshold} profit line.\n\nAI Advice:\n{advice}",
+                    )
+
+                    # Lock the engine for the rest of the day so it doesn't spam your phone
+                    state.last_harvest_date = now.date()
+
             if state.skimmer_active:
                 if now.hour != 5 or not state.brief_active:
                     for item in combined_portfolio:
@@ -439,7 +462,7 @@ st.progress(
 )
 st.write("")
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
     st.markdown("#### 🌅 Morning Brief")
@@ -521,6 +544,33 @@ with col3:
 st.markdown("---")
 st.markdown("#### 📝 Discovery Watchlist")
 st.caption("Manage your custom tracking list. These run alongside your T212 portfolio.")
+
+with col4:
+    st.markdown("#### 🌾 Auto-Harvester")
+    new_thresh = st.number_input(
+        "Take-Profit (£)",
+        min_value=1.0,
+        value=float(shared_state.harvest_threshold),
+        step=1.0,
+    )
+    if new_thresh != shared_state.harvest_threshold:
+        shared_state.harvest_threshold = new_thresh
+
+    if shared_state.auto_harvest_active:
+        st.success(f"Active (Trigger: £{shared_state.harvest_threshold})")
+        if st.button("🔴 Stop Harvester", key="stop_harv", width="stretch"):
+            shared_state.auto_harvest_active = False
+            log_event(shared_state, "User Override: Auto-Harvester paused.")
+            st.rerun()
+    else:
+        st.warning("Paused")
+        if st.button("🟢 Start Harvester", key="start_harv", width="stretch"):
+            shared_state.auto_harvest_active = True
+            log_event(
+                shared_state,
+                f"User Override: Harvester activated at £{shared_state.harvest_threshold}.",
+            )
+            st.rerun()
 
 # --- 1. THE ADD BAR ---
 col1, col2 = st.columns([3, 1])
