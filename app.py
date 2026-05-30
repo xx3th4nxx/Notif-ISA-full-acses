@@ -113,22 +113,28 @@ def send_ntfy(title, message):
 
 @st.cache_data(ttl=3600)
 def get_portfolio_from_t212():
-    # 1. Fetch the API Key
     raw_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
 
     if not raw_key:
         st.error("🚨 Missing Key! Ensure T212_API_KEY is in your secrets.")
         return []
 
-    # Clean the key to instantly strip out accidental leading/trailing spaces
-    api_key = raw_key.strip()
+    # Clean the key of spaces and accidental newline characters
+    api_key = str(raw_key).strip()
+
+    # --- THE DEBUGGER ---
+    # Look at your terminal console to see exactly what Python is doing
+    print(f"[{get_timestamp()}] [DEBUG] Raw Key Length: {len(str(raw_key))}")
+    print(f"[{get_timestamp()}] [DEBUG] Cleaned Key Length: {len(api_key)}")
+    print(
+        f"[{get_timestamp()}] [DEBUG] Key starts with: '{api_key[:5]}' and ends with: '{api_key[-5:]}'"
+    )
+    # --------------------
 
     url = "https://live.trading212.com/api/v0/equity/portfolio"
     headers = {"Authorization": api_key}
 
-    # ... (rest of your try/except block stays exactly the same)
     try:
-        # 3. Fire the request with the new raw header format
         response = requests.get(url, headers=headers, timeout=10)
 
         if response.status_code == 200:
@@ -157,7 +163,6 @@ def get_portfolio_from_t212():
             )
             return []
 
-    # 4. This is the except block Python was looking for!
     except Exception as e:
         st.error(f"🚨 Network Error: {e}")
         return []
