@@ -8,6 +8,7 @@ import traceback
 from datetime import datetime, timedelta
 import yfinance as yf
 from groq import Groq
+import json
 
 st.set_page_config(page_title="ISA Trading Bot", layout="wide", page_icon="📈")
 
@@ -37,6 +38,7 @@ def get_shared_state():
             self.stop_loss_pct = 5.0
             self.price_thread_running = False
             self.logs = []
+            self.custom_watchlist = load_watchlist()
 
     return SharedState()
 
@@ -45,6 +47,24 @@ shared_state = get_shared_state()
 
 
 # --- 3. CORE FUNCTIONS (Top Level - Zero Indentation) ---
+WATCHLIST_FILE = "watchlist.json"
+
+
+def load_watchlist():
+    if os.path.exists(WATCHLIST_FILE):
+        try:
+            with open(WATCHLIST_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+
+def save_watchlist(watchlist):
+    with open(WATCHLIST_FILE, "w") as f:
+        json.dump(watchlist, f)
+
+
 def get_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -220,22 +240,24 @@ def analyze_news(headline, symbol, state):
         send_ntfy(f"⚠️ Skimmer AI Failed: {symbol}", f"Error: {str(e)}")
 
 
-# --- 4. BACKGROUND RADAR ENGINES ---
+# --- 4. BACKGROUND ENGINES ---
 def price_patrol(state):
     print(f"[{get_timestamp()}] [SYSTEM] Real-Time Price Radar booted.")
     high_water_marks = {}
-
     while True:
         if not state.price_monitor_active:
             time.sleep(10)
             continue
 
-        for item in MY_PORTFOLIO:
+        combined_portfolio = MY_PORTFOLIO.copy()
+        for t in state.custom_watchlist:
+            if not any(item["symbol"] == t for item in combined_portfolio):
+                combined_portfolio.append({"symbol": t})
+
+        for item in combined_portfolio:
             symbol = item["symbol"]
             try:
-                ticker = yf.Ticker(symbol)
-                current_price = ticker.fast_info["lastPrice"]
-
+                current_price = yf.Ticker(symbol).fast_info["lastPrice"]
                 if symbol not in high_water_marks:
                     high_water_marks[symbol] = current_price
                 elif current_price > high_water_marks[symbol]:
@@ -245,33 +267,28 @@ def price_patrol(state):
                     (high_water_marks[symbol] - current_price)
                     / high_water_marks[symbol]
                 ) * 100
-
                 if drop_pct >= state.stop_loss_pct:
                     alert_msg = f"{symbol} dropped {drop_pct:.1f}% from its recent high! Current Price: ${current_price:.2f}"
                     log_event(state, f"PRICE ALARM: {alert_msg}", is_error=True)
                     send_ntfy(f"🚨 📉 {symbol} CRASH ALERT", alert_msg)
                     high_water_marks[symbol] = current_price
-
-            except Exception as e:
+            except:
                 pass
-
         time.sleep(60)
 
 
 def master_patrol(state):
     print(f"[{get_timestamp()}] [SYSTEM] Background engine booted.")
     system_health_check()
-
     last_brief_date = None
     last_memory_flush_date = datetime.now().date()
 
     try:
         while True:
             now = datetime.now()
-
             if now.date() != last_memory_flush_date:
                 print(
-                    f"[{get_timestamp()}] [SYSTEM] Midnight protocol: Flushing memory & resetting Groq quota."
+                    f"[{get_timestamp()}] [SYSTEM] Midnight protocol: Flushing memory."
                 )
                 state.processed_headlines.clear()
                 state.daily_ai_calls = 0
@@ -281,113 +298,67 @@ def master_patrol(state):
                 time.sleep(10)
                 continue
 
-            current_portfolio = MY_PORTFOLIO
+            combined_portfolio = MY_PORTFOLIO.copy()
+            for t in state.custom_watchlist:
+                if not any(item["symbol"] == t for item in combined_portfolio):
+                    combined_portfolio.append({"symbol": t})
 
-            # FEATURE 1: 6 AM MORNING BRIEF
             if state.brief_active:
                 if now.hour == 5 and now.date() != last_brief_date:
-                    print(f"[{get_timestamp()}] [BRIEF] INITIATING 6AM SEQUENCE...")
                     target_stocks = random.sample(
-                        current_portfolio, min(3, len(current_portfolio))
+                        combined_portfolio, min(3, len(combined_portfolio))
                     )
                     yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-
                     for item in target_stocks:
                         symbol = item["symbol"]
                         try:
-                            print(
-                                f"[{get_timestamp()}] [BRIEF] Fetching Finnhub for {symbol}..."
-                            )
                             url = f"https://finnhub.io/api/v1/company-news?symbol={symbol}&from={yesterday_str}&to={now.strftime('%Y-%m-%d')}&token={FINNHUB_KEY}"
-                            response = requests.get(url)
-                            news = response.json()
-
-                            if isinstance(news, list) and len(news) > 0:
-                                if state.daily_ai_calls >= 500:
-                                    log_event(
-                                        state,
-                                        f"Skipping Brief for {symbol}: Groq Limit Reached.",
-                                    )
-                                    continue
-
-                                headline = news[0]["headline"]
-                                prompt = f"Give a 1-sentence morning summary for {symbol} based on this headline: '{headline}'"
-
+                            news = requests.get(url).json()
+                            if (
+                                isinstance(news, list)
+                                and len(news) > 0
+                                and state.daily_ai_calls < 500
+                            ):
+                                prompt = f"Give a 1-sentence morning summary for {symbol} based on this headline: '{news[0]['headline']}'"
                                 chat_completion = groq_client.chat.completions.create(
                                     messages=[{"role": "user", "content": prompt}],
                                     model="llama-3.3-70b-versatile",
                                     temperature=0.2,
                                 )
-                                ai_response_text = chat_completion.choices[
-                                    0
-                                ].message.content.strip()
-
                                 state.daily_ai_calls += 1
                                 send_ntfy(
-                                    f"🌅 {symbol} Morning Brief", ai_response_text
-                                )
-                            else:
-                                print(
-                                    f"[{get_timestamp()}] [BRIEF] PASS: No valid market news for {symbol}."
+                                    f"🌅 {symbol} Morning Brief",
+                                    chat_completion.choices[0].message.content.strip(),
                                 )
                         except Exception as e:
-                            error_trace = traceback.format_exc()
-                            log_event(
-                                state,
-                                f"BRIEF CRASH on {symbol}: \n{error_trace}",
-                                is_error=True,
-                            )
                             send_ntfy(f"⚠️ Brief Failed: {symbol}", f"Error: {str(e)}")
-
                     last_brief_date = now.date()
 
-            # FEATURE 2: 10-MINUTE SKIMMER (Smart Router)
             if state.skimmer_active:
-                if now.hour == 5 and state.brief_active:
-                    log_event(
-                        state, "Skimmer skipped to prevent duplicate morning alerts."
-                    )
-                else:
-                    log_event(state, "Executing smart portfolio sweep...")
-                    for item in current_portfolio:
+                if now.hour != 5 or not state.brief_active:
+                    for item in combined_portfolio:
                         symbol = item["symbol"]
                         try:
                             if symbol.endswith(".L"):
-                                log_event(
-                                    state, f"Routing {symbol} to Yahoo Finance..."
-                                )
-                                ticker = yf.Ticker(symbol)
-                                news = ticker.news
+                                news = yf.Ticker(symbol).news
                                 if news and isinstance(news, list):
                                     analyze_news(news[0]["title"], symbol, state)
                             else:
                                 url = f"https://finnhub.io/api/v1/company-news?symbol={symbol}&from={now.strftime('%Y-%m-%d')}&to={now.strftime('%Y-%m-%d')}&token={FINNHUB_KEY}"
-                                response = requests.get(url)
-                                news_items = response.json()
+                                news_items = requests.get(url).json()
                                 if isinstance(news_items, list) and len(news_items) > 0:
                                     analyze_news(
                                         news_items[0]["headline"], symbol, state
                                     )
                         except Exception as e:
-                            log_event(
-                                state,
-                                f"SKIMMER CRASH on {symbol}: \n{traceback.format_exc()}",
-                                is_error=True,
-                            )
                             send_ntfy(
                                 f"⚠️ Skimmer Failed: {symbol}", f"Error: {str(e)}"
                             )
 
-            log_event(state, "Sweep cycle finished. Sleeping 600s (10 minutes).")
             time.sleep(600)
 
     except Exception as fatal_error:
-        error_details = str(fatal_error)
-        log_event(state, f"FATAL ENGINE CRASH: {error_details}", is_error=True)
-        send_ntfy(
-            "🚨 BOT OFFLINE: Fatal Crash",
-            f"The master loop died. Reason: {error_details}",
-        )
+        send_ntfy("🚨 BOT OFFLINE: Fatal Crash", str(fatal_error))
         state.thread_running = False
 
 
@@ -492,6 +463,19 @@ with col3:
                 f"Live Price Radar is monitoring at a -{shared_state.stop_loss_pct}% trigger.",
             )
             st.rerun()
+
+st.markdown("---")
+st.markdown("#### 📝 Discovery Watchlist")
+watchlist_input = st.text_input(
+    "Enter symbols to hunt for buy signals (e.g., AAPL, TSLA, RR.L):",
+    value=", ".join(shared_state.custom_watchlist),
+)
+if watchlist_input is not None:
+    new_watchlist = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
+    if new_watchlist != shared_state.custom_watchlist:
+        shared_state.custom_watchlist = new_watchlist
+        save_watchlist(new_watchlist)
+        st.rerun()
 
 st.markdown("---")
 st.markdown("#### 🛠️ Diagnostics")
