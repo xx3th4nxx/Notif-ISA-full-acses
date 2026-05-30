@@ -92,23 +92,24 @@ def send_ntfy(title, message):
 
 @st.cache_data(ttl=3600)
 def get_portfolio_from_t212():
-    api_key_id = os.getenv("T212_API_KEY_ID") or st.secrets.get("T212_API_KEY_ID")
-    api_secret = os.getenv("T212_API_SECRET") or st.secrets.get("T212_API_SECRET")
+    # Only uses the single API token method
+    api_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
 
-    if not api_key_id or not api_secret:
-        st.error(
-            "🚨 API Keys Missing! Please add both T212_API_KEY_ID and T212_API_SECRET to your secrets."
-        )
+    if not api_key:
+        st.error("🚨 API Key Missing! Ensure T212_API_KEY is in your secrets.")
         return []
 
-    # If using a Practice account, change 'live' to 'demo' in the URL below
+    # --- THE SERVER TOGGLE ---
+    # If your API key is from a Practice account, change 'live' to 'demo' right here:
     url = "https://live.trading212.com/api/v0/equity/portfolio"
 
+    headers = {"Authorization": api_key}
+
     try:
-        response = requests.get(url, auth=(api_key_id, api_secret), timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
 
         if response.status_code == 200:
-            print(f"[{get_timestamp()}] [SYSTEM] T212 Portfolio Sync Successful!")
+            print(f"[{get_timestamp()}] [SYSTEM] T212 Sync Successful!")
             clean_portfolio = []
             for item in response.json():
                 raw_ticker = item.get("ticker", "")
@@ -123,15 +124,13 @@ def get_portfolio_from_t212():
                     {
                         "symbol": clean_ticker,
                         "shares": item.get("quantity", 0),
-                        "avg_price": item.get("averagePrice", 0),
-                        "current_price": item.get("currentPrice", 0),
                         "profit": item.get("ppl", 0),
                     }
                 )
             return clean_portfolio
         else:
             st.error(
-                f"🚨 T212 Connection Rejected! Status {response.status_code}: {response.text}"
+                f"🚨 T212 Blocked You! Status {response.status_code}: {response.text}"
             )
             return []
     except Exception as e:
@@ -511,36 +510,45 @@ with col3:
 
 st.markdown("---")
 st.markdown("#### 📝 Discovery Watchlist")
-st.caption(
-    "Bulk add symbols below. You can separate them by commas or paste them as a list (one per line)."
-)
+st.caption("Manage your custom tracking list. These run alongside your T212 portfolio.")
 
-# Upgraded to a large, multi-line text box
-watchlist_input = st.text_area(
-    "Watchlist Symbols:", value="\n".join(shared_state.custom_watchlist), height=250
-)
+# --- 1. THE ADD BAR ---
+col1, col2 = st.columns([3, 1])
+with col1:
+    new_symbol = (
+        st.text_input("Add new symbol:", placeholder="e.g. AAPL").strip().upper()
+    )
+with col2:
+    st.write("")  # Spacing to align with the text box
+    st.write("")
+    if st.button("➕ Add", key="add_btn", width="stretch"):
+        if new_symbol:
+            # Safely handle if you paste multiple separated by commas
+            for t in new_symbol.replace("\n", ",").split(","):
+                clean_t = t.strip().upper()
+                if clean_t and clean_t not in shared_state.custom_watchlist:
+                    shared_state.custom_watchlist.append(clean_t)
+            save_watchlist(shared_state.custom_watchlist)
+            send_ntfy("📝 Watchlist Updated", f"Added {new_symbol} to tracking list.")
+            st.rerun()
 
-if watchlist_input is not None:
-    # Safely handle both commas and new-lines from copy/pasting
-    clean_input = watchlist_input.replace("\n", ",")
+# --- 2. THE REMOVE BUTTONS ---
+st.write("**Currently Tracking:**")
+if shared_state.custom_watchlist:
+    for ticker in shared_state.custom_watchlist:
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            st.info(f"🎯 **{ticker}**")
+        with c2:
+            if st.button("❌ Remove", key=f"del_{ticker}", width="stretch"):
+                shared_state.custom_watchlist.remove(ticker)
+                save_watchlist(shared_state.custom_watchlist)
+                st.rerun()
+else:
+    st.info("Your watchlist is currently empty.")
 
-    # Strip whitespace, capitalize, and automatically remove any duplicate tickers
-    new_watchlist = []
-    for t in clean_input.split(","):
-        t = t.strip().upper()
-        if t and t not in new_watchlist:
-            new_watchlist.append(t)
+    st.rerun()
 
-    if new_watchlist != shared_state.custom_watchlist:
-        shared_state.custom_watchlist = new_watchlist
-        save_watchlist(new_watchlist)
-
-        send_ntfy(
-            "📝 Watchlist Merged",
-            f"Now tracking {len(new_watchlist)} custom stocks alongside your main T212 portfolio.",
-        )
-
-        st.rerun()
 st.markdown("---")
 st.markdown("#### 📊 Live Portfolio Holdings")
 st.dataframe(MY_PORTFOLIO, use_container_width=True)
