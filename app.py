@@ -10,6 +10,11 @@ import yfinance as yf
 from groq import Groq
 import json
 
+st.write(
+    "🔍 **Diagnostic Check:** Does the app see the secret? ",
+    "T212_API_KEY" in st.secrets,
+)
+
 st.set_page_config(page_title="ISA Trading Bot", layout="wide", page_icon="📈")
 
 # --- 1. CONFIGURATION & SECRETS ---
