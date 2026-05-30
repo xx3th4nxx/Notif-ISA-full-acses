@@ -1,5 +1,5 @@
 # Ignore Streamlit secrets
-.streamlit/
+.streamlit/secrets.toml
 
 # Ignore personal portfolio data
 portfolio.json
