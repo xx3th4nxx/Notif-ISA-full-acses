@@ -465,12 +465,26 @@ with col3:
 
 st.markdown("---")
 st.markdown("#### 📝 Discovery Watchlist")
-watchlist_input = st.text_input(
-    "Enter symbols to hunt for buy signals (e.g., AAPL, TSLA, RR.L):",
-    value=", ".join(shared_state.custom_watchlist),
+st.caption(
+    "Bulk add symbols below. You can separate them by commas or paste them as a list (one per line)."
 )
+
+# Upgraded to a large, multi-line text box
+watchlist_input = st.text_area(
+    "Watchlist Symbols:", value="\n".join(shared_state.custom_watchlist), height=250
+)
+
 if watchlist_input is not None:
-    new_watchlist = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
+    # Safely handle both commas and new-lines from copy/pasting
+    clean_input = watchlist_input.replace("\n", ",")
+
+    # Strip whitespace, capitalize, and automatically remove any duplicate tickers
+    new_watchlist = []
+    for t in clean_input.split(","):
+        t = t.strip().upper()
+        if t and t not in new_watchlist:
+            new_watchlist.append(t)
+
     if new_watchlist != shared_state.custom_watchlist:
         shared_state.custom_watchlist = new_watchlist
         save_watchlist(new_watchlist)
