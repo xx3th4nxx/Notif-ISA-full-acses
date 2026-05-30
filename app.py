@@ -97,21 +97,26 @@ def send_ntfy(title, message):
 
 @st.cache_data(ttl=3600)
 def get_portfolio_from_t212():
-    # Only uses the single API token method
+    # 1. Fetch BOTH the Key and the Secret
     api_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
+    api_secret = os.getenv("T212_API_SECRET") or st.secrets.get("T212_API_SECRET")
 
+    # Fallback in case you still have the old variable names
     if not api_key:
-        st.error("🚨 API Key Missing! Ensure T212_API_KEY is in your secrets.")
+        api_key = os.getenv("T212_API_KEY_ID") or st.secrets.get("T212_API_KEY_ID")
+
+    if not api_key or not api_secret:
+        st.error(
+            "🚨 Missing Keys! Ensure both T212_API_KEY and T212_API_SECRET are in your secrets."
+        )
         return []
 
-    # --- THE SERVER TOGGLE ---
-    # If your API key is from a Practice account, change 'live' to 'demo' right here:
+    # 2. Toggle Environment (Live vs Demo)
     url = "https://live.trading212.com/api/v0/equity/portfolio"
 
-    headers = {"Authorization": api_key}
-
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        # 3. Python 'requests' handles the Basic Auth base64 encoding automatically!
+        response = requests.get(url, auth=(api_key, api_secret), timeout=10)
 
         if response.status_code == 200:
             print(f"[{get_timestamp()}] [SYSTEM] T212 Sync Successful!")
