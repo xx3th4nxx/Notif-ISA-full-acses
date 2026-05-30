@@ -100,33 +100,76 @@ def get_portfolio_from_t212():
         response = requests.get(url, auth=(api_key_id, api_secret), timeout=10)
         if response.status_code == 200:
             print(f"[{get_timestamp()}] [SYSTEM] T212 Portfolio Sync Successful!")
-
             clean_portfolio = []
-            for item in response.json():
-                raw_ticker = item["ticker"]
 
+            for item in response.json():
+                raw_ticker = item.get("ticker", "")
                 if "_US_EQ" in raw_ticker:
                     clean_ticker = raw_ticker.replace("_US_EQ", "")
-                elif "l_EQ" in raw_ticker:  # Fixed lowercase tag mapping
+                elif "l_EQ" in raw_ticker:
                     clean_ticker = raw_ticker.replace("l_EQ", ".L")
                 else:
                     clean_ticker = raw_ticker.replace("_EQ", "")
 
-                clean_portfolio.append({"symbol": clean_ticker})
-
+                # Extract the new financial data
+                clean_portfolio.append(
+                    {
+                        "symbol": clean_ticker,
+                        "shares": item.get("quantity", 0),
+                        "avg_price": item.get("averagePrice", 0),
+                        "current_price": item.get("currentPrice", 0),
+                        "profit": item.get("ppl", 0),  # Live Profit/Loss
+                    }
+                )
             return clean_portfolio
         else:
-            print(
-                f"[{get_timestamp()}] [SYSTEM] T212 API Error {response.status_code}: {response.text}"
-            )
+            print(f"[{get_timestamp()}] [SYSTEM] T212 Error: {response.text}")
     except Exception as e:
-        print(f"[{get_timestamp()}] [SYSTEM] Failed to fetch T212 portfolio: {e}")
+        print(f"[{get_timestamp()}] [SYSTEM] T212 Fetch Failed: {e}")
 
-    return [{"symbol": "MU"}, {"symbol": "AVGO"}]
+    # Fallback data if API crashes
+    return [
+        {"symbol": "MU", "shares": 10, "profit": 25.50},
+        {"symbol": "AVGO", "shares": 5, "profit": 150.00},
+    ]
 
 
-# Initialize the portfolio globally right after the function definition
 MY_PORTFOLIO = get_portfolio_from_t212()
+
+
+def get_reinvestment_advice(portfolio, watchlist, state):
+    if state.daily_ai_calls >= 500:
+        return "⚠️ Groq daily limit reached. Cannot generate strategy."
+
+    profitable = [p for p in portfolio if p.get("profit", 0) > 0]
+    if not profitable:
+        return "No profitable positions available to skim from right now. Hold steady."
+
+    portfolio_summary = ", ".join(
+        [
+            f"{p['symbol']} (+£{p['profit']:.2f} on {p['shares']} shares)"
+            for p in profitable
+        ]
+    )
+    watchlist_summary = ", ".join(watchlist) if watchlist else "None"
+
+    prompt = (
+        f"My current profitable stock holdings are: {portfolio_summary}. "
+        f"My current watchlist for buying is: {watchlist_summary}. "
+        "Act as a ruthless, strategic trading assistant. 1. Tell me exactly which stock to take profit from and what percentage of those shares to sell. "
+        "2. Recommend exactly which stock from my watchlist I should roll that cash into, or if I should hold cash. Keep the response to 3-4 punchy, actionable sentences."
+    )
+
+    try:
+        chat = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.3,
+        )
+        state.daily_ai_calls += 1
+        return chat.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Error contacting AI: {str(e)}"
 
 
 def log_event(state, message, is_error=False):
@@ -495,6 +538,21 @@ if watchlist_input is not None:
         )
 
         st.rerun()
+
+st.markdown("---")
+st.markdown("#### 🧠 AI Profit Skimmer & Reinvestment Strategy")
+st.caption(
+    "Analyzes your live T212 profits and your Discovery Watchlist to suggest capital rotation."
+)
+
+if st.button("Calculate Reinvestment Strategy", use_container_width=True):
+    with st.spinner("AI is analyzing your live profits and watchlist targets..."):
+        advice = get_reinvestment_advice(
+            MY_PORTFOLIO, shared_state.custom_watchlist, shared_state
+        )
+        st.success("Strategy Generated!")
+        st.info(advice)
+        send_ntfy("🧠 Reinvestment Strategy", advice)
 
 st.markdown("---")
 st.markdown("#### 🛠️ Diagnostics")
