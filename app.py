@@ -23,6 +23,23 @@ if not GROQ_API_KEY:
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
+WATCHLIST_FILE = "watchlist.json"
+
+
+def load_watchlist():
+    if os.path.exists(WATCHLIST_FILE):
+        try:
+            with open(WATCHLIST_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+
+def save_watchlist(watchlist):
+    with open(WATCHLIST_FILE, "w") as f:
+        json.dump(watchlist, f)
+
 
 # --- 2. GLOBAL SHARED STATE ---
 @st.cache_resource
@@ -47,24 +64,6 @@ shared_state = get_shared_state()
 
 
 # --- 3. CORE FUNCTIONS (Top Level - Zero Indentation) ---
-WATCHLIST_FILE = "watchlist.json"
-
-
-def load_watchlist():
-    if os.path.exists(WATCHLIST_FILE):
-        try:
-            with open(WATCHLIST_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return []
-    return []
-
-
-def save_watchlist(watchlist):
-    with open(WATCHLIST_FILE, "w") as f:
-        json.dump(watchlist, f)
-
-
 def get_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
