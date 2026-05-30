@@ -3,6 +3,7 @@ import requests
 import time
 import threading
 import os
+import base64
 import random
 import traceback
 from datetime import datetime, timedelta
@@ -114,27 +115,32 @@ def send_ntfy(title, message):
 @st.cache_data(ttl=3600)
 def get_portfolio_from_t212():
     raw_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
+    raw_secret = os.getenv("T212_API_SECRET") or st.secrets.get("T212_API_SECRET")
 
-    if not raw_key:
-        st.error("🚨 Missing Key! Ensure T212_API_KEY is in your secrets.")
+    if not raw_key or not raw_secret:
+        st.error(
+            "🚨 Missing Credentials! Ensure both T212_API_KEY and T212_API_SECRET are in your secrets."
+        )
         return []
 
-    # Clean the key of spaces and accidental newline characters
+    # Clean the keys to prevent whitespace errors
     api_key = str(raw_key).strip()
+    api_secret = str(raw_secret).strip()
 
-    # --- THE DEBUGGER ---
-    # Look at your terminal console to see exactly what Python is doing
-    print(f"[{get_timestamp()}] [DEBUG] Raw Key Length: {len(str(raw_key))}")
-    print(f"[{get_timestamp()}] [DEBUG] Cleaned Key Length: {len(api_key)}")
-    print(
-        f"[{get_timestamp()}] [DEBUG] Key starts with: '{api_key[:5]}' and ends with: '{api_key[-5:]}'"
+    # --- FORCED BASE64 ENCRYPTION ---
+    credentials_string = f"{api_key}:{api_secret}"
+    encoded_credentials = base64.b64encode(credentials_string.encode("utf-8")).decode(
+        "utf-8"
     )
-    # --------------------
+    headers = {"Authorization": f"Basic {encoded_credentials}"}
+    # --------------------------------
 
+    # Ensure this matches your account type!
+    # Use "https://demo.trading212.com..." if you generated a Practice Mode key.
     url = "https://live.trading212.com/api/v0/equity/portfolio"
-    headers = {"Authorization": api_key}
 
     try:
+        # Notice we are passing 'headers=headers' now, NOT 'auth='
         response = requests.get(url, headers=headers, timeout=10)
 
         if response.status_code == 200:
@@ -793,23 +799,24 @@ if st.button("Run Full Network Diagnostics", width="stretch"):
         # --- 1. TRADING 212 TEST ---
         st.write("**1. Trading 212 Status**")
         raw_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
-        if raw_key:
-            # Clean the key exactly like the main engine does
+        raw_secret = os.getenv("T212_API_SECRET") or st.secrets.get("T212_API_SECRET")
+
+        if raw_key and raw_secret:
             api_key = str(raw_key).strip()
-            headers = {"Authorization": api_key}
+            api_secret = str(raw_secret).strip()
 
             # Test Live
             try:
                 res_live = requests.get(
                     "https://live.trading212.com/api/v0/equity/portfolio",
-                    headers=headers,
+                    auth=(api_key, api_secret),
                     timeout=5,
                 )
                 if res_live.status_code == 200:
                     st.success("✅ Live Environment: Connected & Authenticated.")
                 elif res_live.status_code == 401:
                     st.error(
-                        "❌ Live Environment: 401 Unauthorized (Invalid Key or Permissions)."
+                        "❌ Live Environment: 401 Unauthorized (Invalid Key, Secret, or Permissions)."
                     )
                 else:
                     st.warning(f"⚠️ Live Environment: HTTP {res_live.status_code}")
@@ -820,13 +827,12 @@ if st.button("Run Full Network Diagnostics", width="stretch"):
             try:
                 res_demo = requests.get(
                     "https://demo.trading212.com/api/v0/equity/portfolio",
-                    headers=headers,
+                    auth=(api_key, api_secret),
                     timeout=5,
                 )
                 if res_demo.status_code == 200:
                     st.success("✅ Demo Environment: Connected & Authenticated.")
                 elif res_demo.status_code == 401:
-                    # Downgraded to an "info" alert so it doesn't look like a real error when using a Live key
                     st.info(
                         "ℹ️ Demo Environment: 401 Unauthorized (Normal & expected if using a Live key)."
                     )
@@ -835,7 +841,7 @@ if st.button("Run Full Network Diagnostics", width="stretch"):
             except Exception as e:
                 st.error(f"Demo Environment Network Error: {e}")
         else:
-            st.error("❌ Trading 212: API Key missing from secrets.")
+            st.error("❌ Trading 212: API Key or Secret missing from secrets.")
 
         # --- 2. FINNHUB TEST ---
         st.write("**2. Finnhub News Data Status**")
