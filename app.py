@@ -782,44 +782,87 @@ if st.button("🔴 Simulate Emergency Bearish Event (NVDA Test)", width="stretch
         st.success("Simulation sent! Check your system logs below and your phone.")
 
 st.markdown("---")
-st.markdown("#### 🕵️ Trading 212 Diagnostic Tool")
+st.markdown("#### 🕵️ Master API Diagnostics")
+st.caption(
+    "Pings all external gateways to verify active status and credential validity."
+)
 
-if st.button("Run Network Diagnostics", width="stretch"):
-    with st.spinner("Pinging Trading 212 servers..."):
-        # 1. Fetch credentials exactly as the main loop does
-        api_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
-        api_secret = os.getenv("T212_API_SECRET") or st.secrets.get("T212_API_SECRET")
+if st.button("Run Full Network Diagnostics", width="stretch"):
+    with st.spinner("Pinging API Gateways..."):
 
-        # 2. Define both API environments
-        urls = {
-            "Live Environment": "https://live.trading212.com/api/v0/equity/portfolio",
-            "Demo Environment": "https://demo.trading212.com/api/v0/equity/portfolio",
-        }
-        # 3. Test the connection
-        for env, url in urls.items():
-            st.write(f"**Testing {env}...**")
+        # --- 1. TRADING 212 TEST ---
+        st.write("**1. Trading 212 Status**")
+        raw_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
+        if raw_key:
+            # Clean the key exactly like the main engine does
+            api_key = str(raw_key).strip()
+            headers = {"Authorization": api_key}
+
+            # Test Live
             try:
-                res = requests.get(url, auth=(api_key, api_secret), timeout=10)
-                status = res.status_code
-
-                if status == 200:
-                    st.success(
-                        f"✅ Success! Your keys are perfectly valid for the {env}."
-                    )
-                elif status == 401:
+                res_live = requests.get(
+                    "https://live.trading212.com/api/v0/equity/portfolio",
+                    headers=headers,
+                    timeout=5,
+                )
+                if res_live.status_code == 200:
+                    st.success("✅ Live Environment: Connected & Authenticated.")
+                elif res_live.status_code == 401:
                     st.error(
-                        f"❌ 401 Unauthorized ({env}): Your keys are incorrect, OR you did not check all the permission boxes in the T212 app."
-                    )
-                elif status == 403:
-                    st.error(
-                        f"❌ 403 Forbidden ({env}): You are locked out. Check if you accidentally enabled IP whitelisting in your T212 settings."
-                    )
-                elif status == 429:
-                    st.warning(
-                        f"⚠️ 429 Too Many Requests ({env}): You are hitting the API too fast. Wait a minute for the rate limit to reset."
+                        "❌ Live Environment: 401 Unauthorized (Invalid Key or Permissions)."
                     )
                 else:
-                    st.error(f"⚠️ Unhandled Error {status}: {res.text}")
-
+                    st.warning(f"⚠️ Live Environment: HTTP {res_live.status_code}")
             except Exception as e:
-                st.error(f"Network Failure: {e}")
+                st.error(f"Live Environment Network Error: {e}")
+
+            # Test Demo
+            try:
+                res_demo = requests.get(
+                    "https://demo.trading212.com/api/v0/equity/portfolio",
+                    headers=headers,
+                    timeout=5,
+                )
+                if res_demo.status_code == 200:
+                    st.success("✅ Demo Environment: Connected & Authenticated.")
+                elif res_demo.status_code == 401:
+                    # Downgraded to an "info" alert so it doesn't look like a real error when using a Live key
+                    st.info(
+                        "ℹ️ Demo Environment: 401 Unauthorized (Normal & expected if using a Live key)."
+                    )
+                else:
+                    st.warning(f"⚠️ Demo Environment: HTTP {res_demo.status_code}")
+            except Exception as e:
+                st.error(f"Demo Environment Network Error: {e}")
+        else:
+            st.error("❌ Trading 212: API Key missing from secrets.")
+
+        # --- 2. FINNHUB TEST ---
+        st.write("**2. Finnhub News Data Status**")
+        if FINNHUB_KEY:
+            try:
+                url = f"https://finnhub.io/api/v1/company-news?symbol=AAPL&from={datetime.now().strftime('%Y-%m-%d')}&to={datetime.now().strftime('%Y-%m-%d')}&token={FINNHUB_KEY}"
+                res_finn = requests.get(url, timeout=5)
+                if res_finn.status_code == 200:
+                    st.success("✅ Finnhub: Connected & Streaming.")
+                else:
+                    st.error(f"❌ Finnhub Error: HTTP {res_finn.status_code}")
+            except Exception as e:
+                st.error(f"Finnhub Network Error: {e}")
+        else:
+            st.error("❌ Finnhub: API Key missing.")
+
+        # --- 3. GROQ AI TEST ---
+        st.write("**3. Groq Llama-3 AI Status**")
+        if GROQ_API_KEY:
+            try:
+                groq_client.chat.completions.create(
+                    messages=[{"role": "user", "content": "Reply 'OK'"}],
+                    model="llama-3.3-70b-versatile",
+                    max_tokens=5,
+                )
+                st.success("✅ Groq AI: Connected & Processing.")
+            except Exception as e:
+                st.error(f"❌ Groq Error: {str(e)[:100]}")
+        else:
+            st.error("❌ Groq: API Key missing.")
