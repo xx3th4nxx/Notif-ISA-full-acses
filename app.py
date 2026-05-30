@@ -334,19 +334,50 @@ def analyze_news(headline, symbol, state):
         return False
 
     print(f"[{get_timestamp()}] [GATEKEEPER] APPROVED: Sending to Groq API...")
-    prompt = f"Analyze this market-moving headline: '{headline}' for {symbol}. 1. State clearly if this is a BUY, SELL, or HOLD. 2. Suggest whether the user should use a 'Limit Order' or a 'Stop-Limit Order'. Keep it to 2-5 short sentences."
+
+    # --- UPGRADED QUANTITATIVE PROMPT ---
+    prompt = f"""Analyze this market-moving headline: '{headline}' for {symbol}. 
+You MUST respond using EXACTLY this 2-line format:
+VERDICT: [BUY, SELL, or HOLD] | CONFIDENCE: [1-100]
+REASONING: [2-5 short sentences explaining why, and suggesting a Limit or Stop-Limit order]"""
 
     try:
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.3-70b-versatile",
-            temperature=0.2,
+            temperature=0.1,  # Lower temp = more consistent formatting
         )
         ai_response_text = chat_completion.choices[0].message.content.strip()
         state.daily_ai_calls += 1
-        log_event(state, f"RAW GROQ RESPONSE: {ai_response_text}")
 
-        # --- Live Sentiment Adjustment Integration ---
+        # --- PARSE THE CONFIDENCE SCORE ---
+        try:
+            # Attempt to rip the verdict and score out of the AI's text
+            first_line = ai_response_text.split("\n")[0]
+            verdict_part, confidence_part = first_line.split("|")
+            verdict = verdict_part.split(":")[1].strip().upper()
+            confidence = int(confidence_part.split(":")[1].strip())
+            reasoning = (
+                ai_response_text.split("REASONING:")[1].strip()
+                if "REASONING:" in ai_response_text
+                else ai_response_text
+            )
+        except Exception as parse_error:
+            # Fault tolerance: If the AI hallucinates the format, default to safety
+            verdict = "HOLD"
+            confidence = 50
+            reasoning = ai_response_text
+            log_event(
+                state,
+                f"Format Parse Error: {parse_error}. Raw: {ai_response_text}",
+                is_error=True,
+            )
+
+        log_event(
+            state, f"QUANT SIGNAL -> {symbol}: {verdict} (Score: {confidence}/100)"
+        )
+
+        # --- Live Sentiment Adjustment ---
         base_profile = "GROWTH"
         if isinstance(state.custom_watchlist, dict):
             base_profile = state.custom_watchlist.get(symbol, "GROWTH")
@@ -355,14 +386,21 @@ def analyze_news(headline, symbol, state):
             symbol, ai_response_text, base_profile
         )
 
-        alert_title = f"🚨 {symbol} ACTIONABLE NEWS"
+        # Map color emojis to confidence tiers
+        if confidence >= 80:
+            score_emoji = "🔥"
+        elif confidence >= 60:
+            score_emoji = "📊"
+        else:
+            score_emoji = "⚠️"
+
+        alert_title = f"{score_emoji} {symbol} {verdict} Signal ({confidence}/100)"
         if live_params["status"] != "NORMAL":
-            alert_title = f"{live_params['status']}: {symbol}"
             log_event(
                 state, f"Strategy shift triggered for {symbol}: {live_params['status']}"
             )
 
-        send_ntfy(alert_title, ai_response_text)
+        send_ntfy(alert_title, reasoning)
         state.processed_headlines.add(headline)
         return True
 
@@ -556,21 +594,24 @@ def master_patrol(state):
                         symbol = p["symbol"]
                         profit = p["profit"]
 
-                        # Ask the AI if we should actually sell right now
-                        should_sell, reason = evaluate_harvest_timing(
+                        # Ask the AI if we should actually sell right now, AND get the confidence score
+                        should_sell, confidence, reason = evaluate_harvest_timing(
                             symbol, profit, state
                         )
-                        log_event(state, f"AI Harvest Decision for {symbol}: {reason}")
+                        log_event(
+                            state,
+                            f"AI Harvest Decision for {symbol}: {reason} (Confidence: {confidence}%)",
+                        )
 
                         if should_sell:
                             harvest_candidates.append(p)
                             send_ntfy(
-                                f"✂️ {symbol} Profit Harvest",
+                                f"✂️ {symbol} Profit Harvest (Score: {confidence}/100)",
                                 f"Decision: HARVEST.\nReason: {reason}",
                             )
                         else:
                             send_ntfy(
-                                f"💎 {symbol} Diamond Hands",
+                                f"💎 {symbol} Diamond Hands (Score: {confidence}/100)",
                                 f"Decision: HOLD.\nReason: {reason}",
                             )
 
