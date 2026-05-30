@@ -561,6 +561,9 @@ with col4:
         if st.button("🔴 Stop Harvester", key="stop_harv", width="stretch"):
             shared_state.auto_harvest_active = False
             log_event(shared_state, "User Override: Auto-Harvester paused.")
+
+            # 🔔 Trigger Disarmed Notification
+            send_ntfy("🌾 Auto-Harvester Update", "⏸️ Auto-Harvester has been PAUSED.")
             st.rerun()
     else:
         st.warning("Paused")
@@ -569,6 +572,12 @@ with col4:
             log_event(
                 shared_state,
                 f"User Override: Harvester activated at £{shared_state.harvest_threshold}.",
+            )
+
+            # 🔔 Trigger Armed Notification
+            send_ntfy(
+                "🌾 Auto-Harvester Update",
+                f"🚀 Auto-Harvester is now ACTIVE.\nTarget: £{shared_state.harvest_threshold}",
             )
             st.rerun()
 
