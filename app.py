@@ -113,17 +113,20 @@ def send_ntfy(title, message):
 
 @st.cache_data(ttl=3600)
 def get_portfolio_from_t212():
-    # 1. Fetch ONLY the API Key
-    api_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
+    # 1. Fetch the API Key
+    raw_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
 
-    if not api_key:
+    if not raw_key:
         st.error("🚨 Missing Key! Ensure T212_API_KEY is in your secrets.")
         return []
 
-    # 2. Define the URL and headers BEFORE opening the try block
+    # Clean the key to instantly strip out accidental leading/trailing spaces
+    api_key = raw_key.strip()
+
     url = "https://live.trading212.com/api/v0/equity/portfolio"
     headers = {"Authorization": api_key}
 
+    # ... (rest of your try/except block stays exactly the same)
     try:
         # 3. Fire the request with the new raw header format
         response = requests.get(url, headers=headers, timeout=10)
