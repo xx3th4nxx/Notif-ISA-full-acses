@@ -551,12 +551,11 @@ if shared_state.custom_watchlist:
                 st.rerun()
 else:
     st.info("Your watchlist is currently empty.")
-
-    st.rerun()
+    # (Removed the rogue st.rerun() that was causing the infinite loop!)
 
 st.markdown("---")
 st.markdown("#### 📊 Live Portfolio Holdings")
-st.dataframe(MY_PORTFOLIO, use_container_width=True)
+st.dataframe(MY_PORTFOLIO, width="stretch")
 
 st.markdown("---")
 st.markdown("#### 🧠 AI Profit Skimmer & Reinvestment Strategy")
@@ -564,9 +563,7 @@ st.caption(
     "Analyzes your live T212 profits and your Discovery Watchlist to suggest capital rotation."
 )
 
-if st.button(
-    "Calculate Reinvestment Strategy", key="reinvest_btn", use_container_width=True
-):
+if st.button("Calculate Reinvestment Strategy", key="reinvest_btn", width="stretch"):
     with st.spinner("AI is analyzing your live profits and watchlist targets..."):
         advice = get_reinvestment_advice(
             MY_PORTFOLIO, shared_state.custom_watchlist, shared_state
@@ -577,7 +574,7 @@ if st.button(
 
 st.markdown("---")
 st.markdown("#### 🛠️ Diagnostics")
-if st.button("🔔 Send Manual Test Notification"):
+if st.button("🔔 Send Manual Test Notification", width="stretch"):
     success, details = send_ntfy(
         "✅ Dashboard Connected", "Diagnostic tracing enabled."
     )
@@ -599,5 +596,5 @@ if shared_state.logs:
 else:
     st.info("System standing by. Waiting for engine output...")
 
-if st.button("🔄 Refresh Logs", key="force_refresh_logs_btn"):
+if st.button("🔄 Refresh Logs", key="force_refresh_logs_btn", width="stretch"):
     st.rerun()
