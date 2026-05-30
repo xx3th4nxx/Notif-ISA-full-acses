@@ -536,8 +536,7 @@ if watchlist_input is not None:
         )
 
         st.rerun()
-
-        st.markdown("---")
+st.markdown("---")
 st.markdown("#### 📊 Live Portfolio Holdings")
 st.dataframe(MY_PORTFOLIO, use_container_width=True)
 
@@ -547,7 +546,9 @@ st.caption(
     "Analyzes your live T212 profits and your Discovery Watchlist to suggest capital rotation."
 )
 
-if st.button("Calculate Reinvestment Strategy", use_container_width=True):
+if st.button(
+    "Calculate Reinvestment Strategy", key="reinvest_btn", use_container_width=True
+):
     with st.spinner("AI is analyzing your live profits and watchlist targets..."):
         advice = get_reinvestment_advice(
             MY_PORTFOLIO, shared_state.custom_watchlist, shared_state
@@ -555,12 +556,6 @@ if st.button("Calculate Reinvestment Strategy", use_container_width=True):
         st.success("Strategy Generated!")
         st.info(advice)
         send_ntfy("🧠 Reinvestment Strategy", advice)
-
-st.markdown("---")
-st.markdown("#### 🧠 AI Profit Skimmer & Reinvestment Strategy")
-st.caption(
-    "Analyzes your live T212 profits and your Discovery Watchlist to suggest capital rotation."
-)
 
 if st.button("Calculate Reinvestment Strategy", use_container_width=True):
     with st.spinner("AI is analyzing your live profits and watchlist targets..."):
