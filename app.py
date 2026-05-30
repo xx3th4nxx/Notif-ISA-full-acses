@@ -12,6 +12,24 @@ import json
 
 st.set_page_config(page_title="ISA Trading Bot", layout="wide", page_icon="📈")
 
+# --- STRATEGY PROFILES ---
+STRATEGIES = {
+    "AGGRESSIVE": {
+        "stop_multiplier": 1.5,  # Tight stop for high volatility
+        "harvest_threshold": 5.0,  # Harvest profits quickly
+        "reinvest_mode": "MOMENTUM",
+    },
+    "GROWTH": {
+        "stop_multiplier": 2.5,  # Balanced breathing room
+        "harvest_threshold": 15.0,
+        "reinvest_mode": "BALANCED",
+    },
+    "DEFENSIVE": {
+        "stop_multiplier": 4.0,  # Wide stop to avoid getting shaken out
+        "harvest_threshold": 50.0,  # Don't touch, just let it compound
+        "reinvest_mode": "DIVIDEND",
+    },
+}
 # --- 1. CONFIGURATION & SECRETS ---
 FINNHUB_KEY = os.getenv("FINNHUB_KEY") or st.secrets.get("FINNHUB_KEY")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC") or st.secrets.get("NTFY_TOPIC")
@@ -262,12 +280,10 @@ def analyze_news(headline, symbol, state):
         "revenue",
     ]
 
-    # --- FIXED: The Gatekeeper Block ---
     is_actionable = any(word in headline.lower() for word in keywords)
     if not is_actionable:
         state.processed_headlines.add(headline)
         return False
-    # -----------------------------------
 
     print(f"[{get_timestamp()}] [GATEKEEPER] APPROVED: Sending to Groq API...")
     prompt = f"Analyze this market-moving headline: '{headline}' for {symbol}. 1. State clearly if this is a BUY, SELL, or HOLD. 2. Suggest whether the user should use a 'Limit Order' or a 'Stop-Limit Order'. Keep it to 2-5 short sentences."
@@ -281,15 +297,77 @@ def analyze_news(headline, symbol, state):
         ai_response_text = chat_completion.choices[0].message.content.strip()
         state.daily_ai_calls += 1
         log_event(state, f"RAW GROQ RESPONSE: {ai_response_text}")
-        send_ntfy(f"🚨 {symbol} ACTIONABLE NEWS", ai_response_text)
-        state.processed_headlines.add(headline)
 
-        return True  # <--- Triggers the reinvestment strategy
+        # --- Live Sentiment Adjustment Integration ---
+        base_profile = "GROWTH"
+        if isinstance(state.custom_watchlist, dict):
+            base_profile = state.custom_watchlist.get(symbol, "GROWTH")
+
+        live_params = get_sentiment_adjusted_params(
+            symbol, ai_response_text, base_profile
+        )
+
+        alert_title = f"🚨 {symbol} ACTIONABLE NEWS"
+        if live_params["status"] != "NORMAL":
+            alert_title = f"{live_params['status']}: {symbol}"
+            log_event(
+                state, f"Strategy shift triggered for {symbol}: {live_params['status']}"
+            )
+
+        send_ntfy(alert_title, ai_response_text)
+        state.processed_headlines.add(headline)
+        return True
 
     except Exception as e:
         log_event(state, f"AI CRASH: \n{traceback.format_exc()}", is_error=True)
         send_ntfy(f"⚠️ Skimmer AI Failed: {symbol}", f"Error: {str(e)}")
         return False
+
+
+def get_market_regime():
+    try:
+        data = yf.Ticker("VUSA.L").history(period="60d")
+        if data.empty:
+            return "NEUTRAL_CHOPPY"
+        current_price = data["Close"].iloc[-1]
+        ma50 = data["Close"].rolling(window=50).mean().iloc[-1]
+        volatility = data["Close"].pct_change().std()
+
+        if current_price < ma50 and volatility > 0.015:
+            return "BEARISH_PANIC"
+        elif current_price > ma50:
+            return "BULLISH_GROWTH"
+    except:
+        pass
+    return "NEUTRAL_CHOPPY"
+
+
+def get_dynamic_params(regime, base_strategy):
+    params = STRATEGIES.get(base_strategy, STRATEGIES["GROWTH"]).copy()
+    if regime == "BEARISH_PANIC":
+        params["stop_multiplier"] = 4.5
+        params["harvest_threshold"] = params["harvest_threshold"] * 2
+    elif regime == "BULLISH_GROWTH":
+        params["stop_multiplier"] = 2.0
+    return params
+
+
+def get_sentiment_adjusted_params(symbol, ai_text, base_strategy):
+    params = STRATEGIES.get(base_strategy, STRATEGIES["GROWTH"]).copy()
+    text_upper = ai_text.upper()
+
+    if "SELL" in text_upper or "BEARISH" in text_upper:
+        params["stop_multiplier"] = 1.2
+        params["harvest_threshold"] = 2.0
+        params["status"] = "🚨 PROTECTIVE MODE"
+    elif "BUY" in text_upper or "BULLISH" in text_upper:
+        params["stop_multiplier"] = 3.5
+        params["harvest_threshold"] = params["harvest_threshold"] * 1.5
+        params["status"] = "🚀 MOMENTUM MODE"
+    else:
+        params["status"] = "NORMAL"
+
+    return params
 
 
 # --- 4. BACKGROUND ENGINES ---
@@ -350,11 +428,26 @@ def master_patrol(state):
                 time.sleep(10)
                 continue
 
+            # 1. Build the full tracking list first
             combined_portfolio = MY_PORTFOLIO.copy()
             for t in state.custom_watchlist:
                 if not any(item["symbol"] == t for item in combined_portfolio):
                     combined_portfolio.append({"symbol": t})
 
+            # 2. Get the market status ONCE (Unindented out of the loop above)
+            market_regime = get_market_regime()
+
+            # 3. Loop through your positions with clean alignment
+            for item in combined_portfolio:
+                sym = item["symbol"]
+                base_prof = "GROWTH"
+
+                if isinstance(state.custom_watchlist, dict):
+                    base_prof = state.custom_watchlist.get(sym, "GROWTH")
+
+                current_runtime_params = get_dynamic_params(market_regime, base_prof)
+
+                # --- Rest of your automated harvesting/processing logic goes here ---
             if state.brief_active:
                 if now.hour == 5 and now.date() != last_brief_date:
                     target_stocks = random.sample(
