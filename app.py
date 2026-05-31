@@ -474,6 +474,56 @@ REASONING: [2-5 short sentences explaining why, and suggesting a realistic Limit
         return False
 
 
+def evaluate_reinvestment_confidence(symbol, state):
+    """Evaluates the deployment of harvested capital into a target symbol and assigns a confidence score."""
+    if state.daily_ai_calls >= 500:
+        return "BALANCED", 50, "Groq limit reached. Defaulting to standard allocation."
+
+    try:
+        # Ground the AI with live pricing for the target asset
+        live_price = yf.Ticker(symbol).fast_info["lastPrice"]
+        base_profile = (
+            state.custom_watchlist.get(symbol, "GROWTH")
+            if isinstance(state.custom_watchlist, dict)
+            else "GROWTH"
+        )
+        default_mode = STRATEGIES.get(base_profile, STRATEGIES["GROWTH"])[
+            "reinvest_mode"
+        ]
+
+        prompt = f"""Evaluate deploying fresh harvested capital into {symbol}.
+Current Price: ${live_price:.2f}
+Default Profile: {base_profile} (Standard Allocation Mode: {default_mode})
+
+You MUST respond using EXACTLY this 2-line format:
+REINVEST_MODE: [MOMENTUM, BALANCED, or DIVIDEND] | CONFIDENCE: [1-100]
+REASONING: [2-3 brief sentences explaining if this is a high-conviction entry point based strictly on the current price context]"""
+
+        chat_completion = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.1,
+        )
+        ai_text = chat_completion.choices[0].message.content.strip()
+        state.daily_ai_calls += 1
+
+        # Parse the custom response template
+        first_line = ai_text.split("\n")[0]
+        mode_part, conf_part = first_line.split("|")
+        chosen_mode = mode_part.split(":")[1].strip().upper()
+        confidence = int(conf_part.split(":")[1].strip())
+        reasoning = (
+            ai_text.split("REASONING:")[1].strip()
+            if "REASONING:" in ai_text
+            else ai_text
+        )
+
+        return chosen_mode, confidence, reasoning
+
+    except Exception as e:
+        return "BALANCED", 50, f"Reinvestment calculation fallback triggered: {str(e)}"
+
+
 def get_market_regime():
     """Pulls live VIX data from Yahoo Finance to determine institutional fear levels."""
     try:
@@ -710,6 +760,32 @@ def master_patrol(state):
                                 f"✂️ {symbol} Profit Harvest (Score: {confidence}/100)",
                                 f"Decision: HARVEST.\nReason: {reason}",
                             )
+
+                            # --- NEW: VET THE REINVESTMENT TARGET BEFORE ALLOCATING ---
+                            # Example logic: Rotate out of current symbol into a specific target
+                            target_pool = "MU" if symbol != "MU" else "TSM"
+
+                            reinvest_mode, reinvest_conf, reinvest_reason = (
+                                evaluate_reinvestment_confidence(target_pool, state)
+                            )
+
+                            log_event(
+                                state,
+                                f"🔄 REINVESTMENT SIGNAL -> {target_pool}: {reinvest_mode} (Score: {reinvest_conf}/100)",
+                            )
+
+                            # Protective Gate: Only auto-reinvest if AI confidence is high
+                            if reinvest_conf >= 75:
+                                send_ntfy(
+                                    f"💰 Reinvesting Capital into {target_pool} ({reinvest_conf}/100)",
+                                    f"Strategy: {reinvest_mode}\nReason: {reinvest_reason}",
+                                )
+                                # Place your Trading 212 execution trigger here in the future
+                            else:
+                                send_ntfy(
+                                    f"⚠️ Reinvestment Parked to Cash ({reinvest_conf}/100)",
+                                    f"Confidence too low to force buy into {target_pool}. Capital safely parked. Reason: {reinvest_reason}",
+                                )
                         else:
                             send_ntfy(
                                 f"💎 {symbol} Diamond Hands (Score: {confidence}/100)",
