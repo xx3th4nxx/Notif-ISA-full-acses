@@ -12,6 +12,7 @@ from groq import Groq
 import json
 import sqlite3
 import pandas as pd
+import pytz
 
 st.set_page_config(page_title="ISA Trading Bot", layout="wide", page_icon="📈")
 
@@ -108,6 +109,9 @@ def get_shared_state():
             self.per_stock_thresholds = {}
             self.pending_rotations = []
             self.daily_cooldowns = set()
+            self.trading_enabled = True
+            self.master_heartbeat = datetime.now()
+            self.heartbeat_alert_sent = False
 
     return SharedState()
 
@@ -117,6 +121,45 @@ init_db()
 
 
 # --- 3. CORE FUNCTIONS (Top Level - Zero Indentation) ---
+def verify_price_integrity(symbol, primary_price, state):
+    """
+    Cross-references Yahoo Finance data with Finnhub's live ticker.
+    If the two APIs disagree by more than 5%, it flags a data glitch.
+    """
+    try:
+        # Finnhub requires standard US tickers, strip the .L for UK stocks just for the price check
+        check_symbol = symbol.replace(".L", "") if symbol.endswith(".L") else symbol
+
+        url = (
+            f"https://finnhub.io/api/v1/quote?symbol={check_symbol}&token={FINNHUB_KEY}"
+        )
+        res = requests.get(url, timeout=5)
+
+        if res.status_code == 200:
+            finnhub_data = res.json()
+            secondary_price = finnhub_data.get(
+                "c", 0
+            )  # 'c' is the current price in Finnhub's JSON
+
+            if secondary_price > 0:
+                # Calculate the percentage difference between the two data feeds
+                diff_pct = abs(primary_price - secondary_price) / primary_price * 100
+
+                if diff_pct > 5.0:  # 5% discrepancy threshold
+                    log_event(
+                        state,
+                        f"DATA GLITCH DETECTED: {symbol} YF Price (${primary_price:.2f}) differs massively from Finnhub (${secondary_price:.2f}).",
+                        is_error=True,
+                    )
+                    return False
+        return True
+
+    except Exception as e:
+        # If Finnhub is down, don't paralyze the bot. Log it and trust the primary data.
+        log_event(state, f"Price verification fallback for {symbol}: {e}")
+        return True
+
+
 def get_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -208,11 +251,50 @@ def get_portfolio_from_t212():
 MY_PORTFOLIO = get_portfolio_from_t212()
 
 
+def is_market_open():
+    """Checks if US markets are currently open (Mon-Fri, 9:30 AM - 4:00 PM EST)."""
+    tz = pytz.timezone("US/Eastern")
+    now_est = datetime.now(tz)
+
+    # Block Weekends (5 = Sat, 6 = Sun)
+    if now_est.weekday() >= 5:
+        return False
+
+    # Define 9:30 AM and 4:00 PM boundaries
+    market_open = now_est.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now_est.replace(hour=16, minute=0, second=0, microsecond=0)
+
+    return market_open <= now_est <= market_close
+
+
 def execute_t212_order(symbol, amount, action, state):
     """
     Executes a fractional market order by monetary value on Trading 212.
     action must be "BUY" or "SELL".
     """
+    # --- 🛑 SAFETY NET: HARD MAX SPEND ---
+    MAX_TRADE_VALUE = 50.00  # Set your absolute maximum transaction limit here
+
+    if float(amount) > MAX_TRADE_VALUE:
+        log_event(
+            state,
+            f"FATAL ALARM: Attempted order of £{amount:.2f} exceeds £{MAX_TRADE_VALUE} limit.",
+            is_error=True,
+        )
+        send_ntfy(
+            "🚨 SAFETY BREACH PREVENTED",
+            f"Blocked an abnormal order size of £{amount:.2f} for {symbol}.",
+        )
+        return False, "Order exceeded hardcoded safety ceiling."
+    # --------------------------------------
+    # --- 🛑 SAFETY NET: MARKET HOURS ONLY ---
+    if not is_market_open():
+        log_event(
+            state,
+            f"ORDER BLOCKED: US Markets are closed. Prevented {action} for {symbol}.",
+        )
+        return False, "Market is currently closed."
+    # ----------------------------------------
     raw_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
     raw_secret = os.getenv("T212_API_SECRET") or st.secrets.get("T212_API_SECRET")
 
@@ -244,20 +326,31 @@ def execute_t212_order(symbol, amount, action, state):
 
     url = "https://live.trading212.com/api/v0/equity/orders/market"
 
-    # We use 'value' instead of 'quantity' to handle fractional skims perfectly
-    # Note: T212 requires the value to be positive. The 'action' string dictates the direction.
-    payload = {"ticker": t212_ticker, "value": float(amount), "timeValidity": "DAY"}
+    # --- T212 REQUIREMENT: Value for Buys, Quantity (Shares) for Sells ---
+    if action == "SELL":
+        try:
+            live_price = yf.Ticker(symbol).fast_info["lastPrice"]
+            shares_to_sell = float(amount) / float(live_price)
+            payload = {
+                "ticker": t212_ticker,
+                "quantity": -abs(shares_to_sell),  # Negative indicates SELL
+                "timeValidity": "DAY",
+            }
+        except Exception as e:
+            return False, f"Failed to calculate sell quantity: {e}"
+    else:
+        payload = {
+            "ticker": t212_ticker,
+            "value": float(amount),  # Positive value indicates BUY
+            "timeValidity": "DAY",
+        }
+    # ---------------------------------------------------------------------
 
-    # T212 API determines buy/sell by negative/positive quantities usually,
-    # but for market value orders, some endpoints require specific formatting.
-    # We will pass the payload and let the server route it.
     print(
         f"[{get_timestamp()}] [API] Transmitting {action} order for £{amount} of {t212_ticker}..."
     )
 
     try:
-        # Note: If T212 requires a specific BUY/SELL flag in the JSON for value orders,
-        # ensure your account is enabled for standard fractional API routing.
         response = requests.post(url, headers=headers, json=payload, timeout=10)
 
         if response.status_code == 200:
@@ -267,6 +360,16 @@ def execute_t212_order(symbol, amount, action, state):
                 f"ORDER SUCCESS: {action} £{amount} of {symbol}. ID: {order_data.get('id', 'N/A')}",
             )
             return True, "Executed Successfully"
+
+        elif response.status_code == 429:
+            # --- 🛑 SAFETY NET: RATE LIMIT BACKOFF ---
+            log_event(
+                state,
+                f"RATE LIMIT HIT: Trading 212 (HTTP 429). Cooldown initiated.",
+                is_error=True,
+            )
+            time.sleep(60)  # Force the entire script to pause for 1 minute
+            return False, "HTTP 429: Too Many Requests. Initiated 60s cooldown."
         else:
             error_msg = f"HTTP {response.status_code}: {response.text}"
             log_event(state, f"ORDER REJECTED: {symbol} - {error_msg}", is_error=True)
@@ -298,9 +401,10 @@ def get_reinvestment_advice(portfolio, watchlist, state):
 My current watchlist for buying is: {watchlist_summary}.
 Act as a ruthless, strategic trading assistant.
 
-You MUST respond using EXACTLY this 2-line format:
+You MUST respond using EXACTLY this 3-line format:
+TARGET: [The single ticker symbol of the best watchlist stock to buy]
 CONFIDENCE: [1-100]
-ADVICE: [3 punchy, actionable sentences telling me exactly which profits to skim and which specific watchlist stock to roll the money into.]"""
+ADVICE: [2-3 sentences explaining why]"""
 
     try:
         chat = groq_client.chat.completions.create(
@@ -311,20 +415,17 @@ ADVICE: [3 punchy, actionable sentences telling me exactly which profits to skim
         state.daily_ai_calls += 1
         response = chat.choices[0].message.content.strip()
 
-        # --- PARSE THE SCORE ---
+        # Parse the 3 exact outputs
         try:
-            first_line = response.split("\n")[0]
-            confidence = int(first_line.split(":")[1].strip())
-            advice = (
-                response.split("ADVICE:")[1].strip()
-                if "ADVICE:" in response
-                else response
-            )
+            target = response.split("TARGET:")[1].split("\n")[0].strip().upper()
+            confidence = int(response.split("CONFIDENCE:")[1].split("\n")[0].strip())
+            advice = response.split("ADVICE:")[1].strip()
         except:
+            target = watchlist[0] if watchlist else "VUSA.L"
             confidence = 50
             advice = response
 
-        return confidence, advice
+        return target, confidence, advice
 
     except Exception as e:
         return 0, f"Error contacting AI: {str(e)}"
@@ -742,6 +843,14 @@ def price_patrol(state):
     print(f"[{get_timestamp()}] [SYSTEM] Real-Time Price Radar booted.")
     high_water_marks = {}
     while True:
+        # --- 🛑 SAFETY NET: HEARTBEAT WATCHDOG ---
+        time_since_beat = (datetime.now() - state.master_heartbeat).total_seconds()
+        if time_since_beat > 600 and not state.heartbeat_alert_sent:  # 10 minutes dead
+            send_ntfy(
+                "🚨 FATAL SYSTEM CRASH",
+                "Master Engine has flatlined for 10 minutes. Check the server immediately!",
+            )
+            state.heartbeat_alert_sent = True
         if not state.price_monitor_active:
             time.sleep(10)
             continue
@@ -782,6 +891,11 @@ def master_patrol(state):
 
     try:
         while True:
+            state.master_heartbeat = datetime.now()
+            state.heartbeat_alert_sent = False  # Reset if recovering from a crash
+            if not state.trading_enabled:
+                time.sleep(10)
+                continue  # Freezes the entire auto-harvester engine
             now = datetime.now()
             if now.date() != last_memory_flush_date:
                 print(
@@ -875,14 +989,34 @@ def master_patrol(state):
                     )
 
                     if profit >= specific_threshold:
-                        ripe_profits.append(p)
+                        # --- 🛑 DATA INTEGRITY GUARD: PRICE SANITY CHECK ---
+                        try:
+                            # Pull the live price that triggered the threshold
+                            primary_price = yf.Ticker(symbol).fast_info["lastPrice"]
 
+                            # Force the consensus check
+                            if verify_price_integrity(symbol, primary_price, state):
+                                ripe_profits.append(p)
+                            else:
+                                send_ntfy(
+                                    "⚠️ False Alarm Prevented",
+                                    f"Data glitch detected for {symbol}. API feeds disagree on price. Harvest aborted to protect capital.",
+                                )
+                                state.daily_cooldowns.add(
+                                    symbol
+                                )  # Lock it for the day to prevent spam
+                        except Exception as e:
+                            # Failsafe: If the price check crashes, assume it's ripe but log the error
+                            log_event(
+                                state, f"Integrity check bypassed for {symbol}: {e}"
+                            )
+                            ripe_profits.append(p)
+                        # ---------------------------------------------------
                 if ripe_profits:
                     log_event(
                         state, "Harvester Triggered! AI is evaluating exit momentum..."
                     )
 
-                    harvest_candidates = []
                     for p in ripe_profits:
                         symbol = p["symbol"]
                         profit = p["profit"]
@@ -916,14 +1050,17 @@ def master_patrol(state):
                         )
 
                         if should_sell:
-                            # 1. Ask the AI where to move the money
-                            advice_conf, advice_text = get_reinvestment_advice(
-                                [p], state.custom_watchlist, state
+                            # Unpack the 3 variables including the target
+                            target_asset, advice_conf, advice_text = (
+                                get_reinvestment_advice(
+                                    [p], state.custom_watchlist, state
+                                )
                             )
 
-                            # 2. Package the entire strategy into a pending task
+                            # Package the target into the queue
                             rotation_task = {
                                 "source": symbol,
+                                "target": target_asset,  # <-- CRITICAL FIX
                                 "amount": profit,
                                 "harvest_conf": confidence,
                                 "harvest_reason": reason,
@@ -951,16 +1088,6 @@ def master_patrol(state):
                                 f"💎 {symbol} Diamond Hands (Score: {confidence}/100)",
                                 f"Decision: HOLD.\nReason: {reason}",
                             )
-                    # Only generate reinvestment advice for the stocks we actually decided to sell
-                    if harvest_candidates:
-                        # Unpack the confidence score here so it doesn't crash
-                        advice_conf, advice_text = get_reinvestment_advice(
-                            harvest_candidates, state.custom_watchlist, state
-                        )
-                        send_ntfy(
-                            f"🌾 Auto-Harvester Reinvestment ({advice_conf}/100)",
-                            f"AI Advice for rotated capital:\n{advice_text}",
-                        )
                     # Lock the engine for the day to prevent spam
                     state.last_harvest_date = now.date()
 
@@ -1006,6 +1133,26 @@ if not shared_state.price_thread_running:
 st.title("📈 Notif-ISA Trading Bot")
 st.markdown("---")
 st.subheader("⚙️ Bot Control Panel")
+
+# --- GLOBAL KILL SWITCH ---
+if shared_state.trading_enabled:
+    if st.button(
+        "🛑 ENGAGE GLOBAL KILL SWITCH", type="primary", use_container_width=True
+    ):
+        shared_state.trading_enabled = False
+        log_event(
+            shared_state, "🚨 KILL SWITCH ENGAGED. All trading halted.", is_error=True
+        )
+        send_ntfy("🛑 TRADING HALTED", "The Global Kill Switch has been activated.")
+        st.rerun()
+else:
+    st.error("🚨 SYSTEM IS CURRENTLY HALTED.")
+    if st.button("🟢 Disengage Kill Switch & Resume Trading", use_container_width=True):
+        shared_state.trading_enabled = True
+        log_event(shared_state, "✅ Kill Switch disengaged. Trading resumed.")
+        send_ntfy("🟢 SYSTEM ONLINE", "The Global Kill Switch was disengaged.")
+        st.rerun()
+st.markdown("---")
 # --- MACRO VIX DISPLAY ---
 try:
     live_vix = yf.Ticker("^VIX").fast_info["lastPrice"]
@@ -1340,29 +1487,57 @@ else:
                         buy_success, buy_msg = execute_t212_order(
                             task["target"], task["amount"], "BUY", shared_state
                         )
+                    # 3. REINVEST: Check allocation limits before buying
+                    MAX_POSITION_SIZE = 500.00  # Max total £ allowed in a single asset
 
-                    if buy_success:
-                        log_event(
-                            shared_state,
-                            f"USER APPROVED: Harvested {task['source']} and rotated to {task['target']}.",
+                    with st.spinner(
+                        f"Verifying allocation limits for {task['target']}..."
+                    ):
+                        # Check how much of the target asset we already own
+                        current_holding = next(
+                            (p for p in MY_PORTFOLIO if p["symbol"] == task["target"]),
+                            None,
+                        )
+                        current_value = 0
+                        if current_holding:
+                            try:
+                                live_price = yf.Ticker(task["target"]).fast_info[
+                                    "lastPrice"
+                                ]
+                                current_value = current_holding["shares"] * live_price
+                            except:
+                                pass  # If price check fails, allow the small buy to proceed
+
+                    if (current_value + task["amount"]) > MAX_POSITION_SIZE:
+                        st.error(
+                            f"Allocation limit reached! You already have ~£{current_value:.2f} in {task['target']}."
                         )
                         send_ntfy(
-                            "✅ Reallocation Complete",
-                            f"Successfully secured profits and bought {task['target']}.",
+                            "🛡️ Allocation Blocked",
+                            f"Successfully sold {task['source']}, but cash was parked. Buying {task['target']} would exceed your £{MAX_POSITION_SIZE} limit.",
                         )
-                        st.success("Capital rotation executed perfectly.")
                     else:
-                        st.error(f"Failed to buy target asset: {buy_msg}")
-                        send_ntfy(
-                            "⚠️ Rotation Incomplete",
-                            f"Sold {task['source']}, but failed to buy {task['target']}. Cash is sitting in your account.",
-                        )
-                else:
-                    st.error(f"Failed to harvest source asset: {sell_msg}")
-                    send_ntfy(
-                        "❌ Execution Failed",
-                        "Could not sell the stock. Rotation aborted.",
-                    )
+                        with st.spinner(f"Reinvesting into {task['target']}..."):
+                            buy_success, buy_msg = execute_t212_order(
+                                task["target"], task["amount"], "BUY", shared_state
+                            )
+
+                        if buy_success:
+                            log_event(
+                                shared_state,
+                                f"USER APPROVED: Harvested {task['source']} and rotated to {task['target']}.",
+                            )
+                            send_ntfy(
+                                "✅ Reallocation Complete",
+                                f"Successfully secured profits and bought {task['target']}.",
+                            )
+                            st.success("Capital rotation executed perfectly.")
+                        else:
+                            st.error(f"Failed to buy target asset: {buy_msg}")
+                            send_ntfy(
+                                "⚠️ Rotation Incomplete",
+                                f"Sold {task['source']}, but failed to buy {task['target']}. Cash is parked.",
+                            )
 
                 # --- ENGAGE THE DAILY LOCK ---
                 shared_state.daily_cooldowns.add(task["source"])
