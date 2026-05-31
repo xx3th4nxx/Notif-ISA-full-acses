@@ -1097,20 +1097,30 @@ def master_patrol(state):
 
             if state.skimmer_active:
                 if now.hour != 5 or not state.brief_active:
+                    # --- NEW: Track tickers processed in THIS 10-minute cycle ---
+                    processed_this_cycle = set()
+
                     for item in combined_portfolio:
                         symbol = item["symbol"]
+
+                        # Skip if we already processed a headline for this stock in this run
+                        if symbol in processed_this_cycle:
+                            continue
+
                         try:
                             if symbol.endswith(".L"):
                                 news = yf.Ticker(symbol).news
                                 if news and isinstance(news, list):
-                                    analyze_news(news[0]["title"], symbol, state)
+                                    headline = news[0]["title"]
+                                    if analyze_news(headline, symbol, state):
+                                        processed_this_cycle.add(symbol)  # Lock ticker
                             else:
                                 url = f"https://finnhub.io/api/v1/company-news?symbol={symbol}&from={now.strftime('%Y-%m-%d')}&to={now.strftime('%Y-%m-%d')}&token={FINNHUB_KEY}"
                                 news_items = requests.get(url).json()
                                 if isinstance(news_items, list) and len(news_items) > 0:
-                                    analyze_news(
-                                        news_items[0]["headline"], symbol, state
-                                    )
+                                    headline = news_items[0]["headline"]
+                                    if analyze_news(headline, symbol, state):
+                                        processed_this_cycle.add(symbol)  # Lock ticker
                         except Exception as e:
                             send_ntfy(
                                 f"⚠️ Skimmer Failed: {symbol}", f"Error: {str(e)}"
