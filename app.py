@@ -263,38 +263,92 @@ ADVICE: [3 punchy, actionable sentences telling me exactly which profits to skim
 
 def evaluate_harvest_timing(symbol, profit, state):
     if state.daily_ai_calls >= 500:
-        return True, "API limit reached. Defaulting to safe harvest."
+        return True, 50, "API limit reached. Defaulting to safe harvest."
 
     try:
-        # 1. Fetch live context to make an informed decision
-        url = f"https://finnhub.io/api/v1/company-news?symbol={symbol}&from={datetime.now().strftime('%Y-%m-%d')}&to={datetime.now().strftime('%Y-%m-%d')}&token={FINNHUB_KEY}"
-        news = requests.get(url, timeout=5).json()
-        headline = (
-            news[0]["headline"]
-            if (isinstance(news, list) and len(news) > 0)
-            else "No recent news available."
-        )
+        # 1. Fetch Live Context and Technicals
+        ticker = yf.Ticker(symbol)
+        live_price = ticker.fast_info["lastPrice"]
 
-        # 2. Force the AI into a binary choice
-        prompt = f"I am up £{profit} on {symbol}. The latest news today is: '{headline}'. As a ruthless trading bot, should I 'HARVEST' these profits now before it drops, or 'HOLD' to let it ride higher? Answer with exactly one word (HARVEST or HOLD), followed by a 1-sentence reason."
+        history = ticker.history(period="60d")
+        close_prices = history["Close"]
+
+        # Calculate Moving Averages
+        sma_50 = close_prices.rolling(window=50).mean().iloc[-1]
+        sma_20 = close_prices.rolling(window=20).mean().iloc[-1]
+
+        # Calculate 14-Day RSI
+        delta = close_prices.diff()
+        gains = delta.where(delta > 0, 0).rolling(window=14).mean()
+        losses = -delta.where(delta < 0, 0).rolling(window=14).mean()
+        rs = gains / losses
+        rsi = (100 - (100 / (1 + rs))).iloc[-1]
+
+        # 2. Fetch the latest news headline for fundamental context
+        url = f"https://finnhub.io/api/v1/company-news?symbol={symbol}&from={datetime.now().strftime('%Y-%m-%d')}&to={datetime.now().strftime('%Y-%m-%d')}&token={FINNHUB_KEY}"
+        news_req = requests.get(url, timeout=5)
+        if news_req.status_code == 200:
+            news = news_req.json()
+            headline = (
+                news[0]["headline"]
+                if (isinstance(news, list) and len(news) > 0)
+                else "No major news today."
+            )
+        else:
+            headline = "News feed temporarily unavailable."
+
+        # 3. Force the AI into a quantitative momentum decision
+        prompt = f"""I have a profitable position (+£{profit:.2f}) on {symbol}. My threshold is met, but I only want to sell if the momentum is dying or the market is turning.
+Current Price: ${live_price:.2f}
+20-Day SMA (Short Trend): ${sma_20:.2f}
+50-Day SMA (Medium Trend): ${sma_50:.2f}
+14-Day RSI: {rsi:.1f}
+Latest Headline: '{headline}'
+
+Analyze the technicals:
+- If RSI is high (>70), it is overbought and a great time to HARVEST profits before a pullback.
+- If price is falling below the 20-Day SMA, short-term momentum is breaking down: HARVEST.
+- If RSI is healthy (40-60) and price is climbing above SMAs, the run isn't over: HOLD.
+
+You MUST respond using EXACTLY this 2-line format:
+VERDICT: [HARVEST or HOLD] | CONFIDENCE: [1-100]
+REASONING: [2-3 short sentences explaining the technical and fundamental reasons to harvest now or let it ride.]"""
 
         chat = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.3-70b-versatile",
-            temperature=0.2,
+            temperature=0.1,
         )
         state.daily_ai_calls += 1
         response = chat.choices[0].message.content.strip()
 
-        # 3. Parse the verdict
-        if response.upper().startswith("HOLD"):
-            return False, response
-        return True, response
+        # 4. Parse the strict output format
+        try:
+            first_line = response.split("\n")[0]
+            verdict_part, conf_part = first_line.split("|")
+            verdict = verdict_part.split(":")[1].strip().upper()
+            confidence = int(conf_part.split(":")[1].strip())
+            reasoning = (
+                response.split("REASONING:")[1].strip()
+                if "REASONING:" in response
+                else response
+            )
+        except Exception:
+            # Failsafe if AI breaks formatting
+            verdict = "HARVEST"
+            confidence = 50
+            reasoning = (
+                "Format parsing failed. Defaulting to taking profits to be safe."
+            )
+
+        should_sell = verdict == "HARVEST"
+        return should_sell, confidence, reasoning
 
     except Exception as e:
         return (
             True,
-            f"HARVEST: Error analyzing timing ({e}), defaulting to secure profits.",
+            50,
+            f"Error calculating technicals ({e}). Defaulting to safe harvest to lock in capital.",
         )
 
 
