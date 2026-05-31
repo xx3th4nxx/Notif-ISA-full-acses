@@ -209,40 +209,55 @@ MY_PORTFOLIO = get_portfolio_from_t212()
 
 def get_reinvestment_advice(portfolio, watchlist, state):
     if state.daily_ai_calls >= 500:
-        return "⚠️ Groq daily limit reached. Cannot generate strategy."
+        return 0, "⚠️ Groq daily limit reached. Cannot generate strategy."
 
     profitable = [p for p in portfolio if p.get("profit", 0) > 0]
     if not profitable:
-        return "No profitable positions available to skim from right now. Hold steady."
+        return (
+            0,
+            "No profitable positions available to skim from right now. Hold steady.",
+        )
 
     portfolio_summary = ", ".join(
-        [
-            f"{p['symbol']} (+£{p['profit']:.2f} on {p['shares']} shares)"
-            for p in profitable
-        ]
+        [f"{p['symbol']} (+£{p['profit']:.2f})" for p in profitable]
     )
     watchlist_summary = ", ".join(watchlist) if watchlist else "None"
 
-    prompt = (
-        f"My current profitable stock holdings are: {portfolio_summary}. "
-        f"My current watchlist for buying is: {watchlist_summary}. "
-        "Act as a ruthless, strategic trading assistant handling fractional shares. "
-        "STRICT RULES: "
-        "1. ONLY recommend 'skimming the profit'. Tell me to sell the exact monetary value of the profit, leaving the principal investment perfectly intact. "
-        "2. EXCEPTION: You may recommend selling 100% of a holding ONLY IF the stock is performing poorly OR it is highly strategic to rotate all that capital into a specific watchlist stock. "
-        "3. Tell me exactly which watchlist stock to roll the money into. Keep the response to 3 punchy, actionable sentences."
-    )
+    # --- UPGRADED QUANTITATIVE PROMPT ---
+    prompt = f"""My current profitable stock holdings are: {portfolio_summary}.
+My current watchlist for buying is: {watchlist_summary}.
+Act as a ruthless, strategic trading assistant.
+
+You MUST respond using EXACTLY this 2-line format:
+CONFIDENCE: [1-100]
+ADVICE: [3 punchy, actionable sentences telling me exactly which profits to skim and which specific watchlist stock to roll the money into.]"""
 
     try:
         chat = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.3-70b-versatile",
-            temperature=0.2,
+            temperature=0.1,
         )
         state.daily_ai_calls += 1
-        return chat.choices[0].message.content.strip()
+        response = chat.choices[0].message.content.strip()
+
+        # --- PARSE THE SCORE ---
+        try:
+            first_line = response.split("\n")[0]
+            confidence = int(first_line.split(":")[1].strip())
+            advice = (
+                response.split("ADVICE:")[1].strip()
+                if "ADVICE:" in response
+                else response
+            )
+        except:
+            confidence = 50
+            advice = response
+
+        return confidence, advice
+
     except Exception as e:
-        return f"Error contacting AI: {str(e)}"
+        return 0, f"Error contacting AI: {str(e)}"
 
 
 def evaluate_harvest_timing(symbol, profit, state):
@@ -794,14 +809,14 @@ def master_patrol(state):
 
                     # Only generate reinvestment advice for the stocks we actually decided to sell
                     if harvest_candidates:
-                        advice = get_reinvestment_advice(
+                        # Unpack the confidence score here so it doesn't crash
+                        advice_conf, advice_text = get_reinvestment_advice(
                             harvest_candidates, state.custom_watchlist, state
                         )
                         send_ntfy(
-                            "🌾 Auto-Harvester Reinvestment",
-                            f"AI Advice for rotated capital:\n{advice}",
+                            f"🌾 Auto-Harvester Reinvestment ({advice_conf}/100)",
+                            f"AI Advice for rotated capital:\n{advice_text}",
                         )
-
                     # Lock the engine for the day to prevent spam
                     state.last_harvest_date = now.date()
 
@@ -1081,12 +1096,23 @@ st.caption(
 
 if st.button("Calculate Reinvestment Strategy", key="reinvest_btn", width="stretch"):
     with st.spinner("AI is analyzing your live profits and watchlist targets..."):
-        advice = get_reinvestment_advice(
+        # Unpack the two new variables
+        confidence, advice = get_reinvestment_advice(
             MY_PORTFOLIO, shared_state.custom_watchlist, shared_state
         )
-        st.success("Strategy Generated!")
-        st.info(advice)
-        send_ntfy("🧠 Reinvestment Strategy", advice)
+
+        # Display color-coded conviction tiers
+        if confidence >= 80:
+            st.success(f"🔥 High Conviction Strategy (Score: {confidence}/100)")
+        elif confidence >= 60:
+            st.info(f"📊 Standard Strategy (Score: {confidence}/100)")
+        elif confidence > 0:
+            st.warning(f"⚠️ Low Conviction Strategy (Score: {confidence}/100)")
+        else:
+            st.error("Strategy Generation Failed.")
+
+        st.write(advice)
+        send_ntfy(f"🧠 Reinvestment Strategy ({confidence}/100)", advice)
 
 st.markdown("---")
 st.markdown("#### 🛠️ Diagnostics")
