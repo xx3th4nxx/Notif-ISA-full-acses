@@ -387,11 +387,23 @@ def analyze_news(headline, symbol, state):
 
     print(f"[{get_timestamp()}] [GATEKEEPER] APPROVED: Sending to Groq API...")
 
-    # --- UPGRADED QUANTITATIVE PROMPT ---
+    # --- NEW: Fetch live price grounding data ---
+    try:
+        live_price = yf.Ticker(symbol).fast_info["lastPrice"]
+        price_context = (
+            f"The current live market price for {symbol} is ${live_price:.2f}."
+        )
+    except Exception:
+        live_price = None
+        price_context = ""
+    # --------------------------------------------
+
+    # --- UPGRADED PRICE-AWARE PROMPT ---
     prompt = f"""Analyze this market-moving headline: '{headline}' for {symbol}. 
+{price_context}
 You MUST respond using EXACTLY this 2-line format:
 VERDICT: [BUY, SELL, or HOLD] | CONFIDENCE: [1-100]
-REASONING: [2-5 short sentences explaining why, and suggesting a Limit or Stop-Limit order]"""
+REASONING: [2-5 short sentences explaining why, and suggesting a realistic Limit or Stop-Limit order based strictly on the live price provided]"""
 
     try:
         chat_completion = groq_client.chat.completions.create(
