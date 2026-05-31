@@ -407,7 +407,7 @@ Act as a ruthless, strategic trading assistant.
 You MUST respond using EXACTLY this 3-line format:
 TARGET: [The single ticker symbol of the best watchlist stock to buy]
 CONFIDENCE: [1-100]
-ADVICE: [2-3 sentences explaining why]"""
+ADVICE: [3 punchy sentences telling me EXACTLY which stock profits to skim, the exact total £ amount to rotate, and why the target is the best place to put that specific cash.]"""
 
     try:
         chat = groq_client.chat.completions.create(
