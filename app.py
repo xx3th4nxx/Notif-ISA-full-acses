@@ -382,11 +382,14 @@ def execute_t212_order(symbol, amount, action, state):
 
 def get_reinvestment_advice(portfolio, watchlist, state):
     if state.daily_ai_calls >= 500:
-        return 0, "⚠️ Groq daily limit reached. Cannot generate strategy."
+        # --- THE FIX: Added "CASH" as the target fallback ---
+        return "CASH", 0, "⚠️ Groq daily limit reached. Cannot generate strategy."
 
     profitable = [p for p in portfolio if p.get("profit", 0) > 0]
     if not profitable:
+        # --- THE FIX: Added "CASH" as the target fallback ---
         return (
+            "CASH",
             0,
             "No profitable positions available to skim from right now. Hold steady.",
         )
@@ -428,7 +431,8 @@ ADVICE: [2-3 sentences explaining why]"""
         return target, confidence, advice
 
     except Exception as e:
-        return 0, f"Error contacting AI: {str(e)}"
+        # --- THE FIX: Added "CASH" as the target fallback ---
+        return "CASH", 0, f"Error contacting AI: {str(e)}"
 
 
 def evaluate_harvest_timing(symbol, profit, state):
