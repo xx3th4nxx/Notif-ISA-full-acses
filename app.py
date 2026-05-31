@@ -1387,8 +1387,9 @@ st.caption(
 
 if st.button("Calculate Reinvestment Strategy", key="reinvest_btn", width="stretch"):
     with st.spinner("AI is analyzing your live profits and watchlist targets..."):
-        # Unpack the two new variables
-        confidence, advice = get_reinvestment_advice(
+
+        # --- THE FIX: Unpack all 3 variables ---
+        target_asset, confidence, advice = get_reinvestment_advice(
             MY_PORTFOLIO, shared_state.custom_watchlist, shared_state
         )
 
@@ -1402,8 +1403,14 @@ if st.button("Calculate Reinvestment Strategy", key="reinvest_btn", width="stret
         else:
             st.error("Strategy Generation Failed.")
 
+        # Show the target asset and the advice text
+        st.write(f"**Target Asset:** {target_asset}")
         st.write(advice)
-        send_ntfy(f"🧠 Reinvestment Strategy ({confidence}/100)", advice)
+
+        send_ntfy(
+            f"🧠 Reinvestment Strategy ({confidence}/100)",
+            f"Target: {target_asset}\n{advice}",
+        )
 
 st.markdown("---")
 st.markdown("#### 🛠️ Diagnostics")
