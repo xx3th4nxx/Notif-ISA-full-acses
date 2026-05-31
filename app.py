@@ -106,6 +106,7 @@ def get_shared_state():
             self.harvest_threshold = 10.0
             self.last_harvest_date = None
             self.per_stock_thresholds = {}
+            self.pending_rotations = []
 
     return SharedState()
 
@@ -490,13 +491,29 @@ REASONING: [2-5 short sentences explaining why, and suggesting a realistic Limit
 
 
 def evaluate_reinvestment_confidence(symbol, state):
-    """Evaluates the deployment of harvested capital into a target symbol and assigns a confidence score."""
+    """Evaluates target asset using live technical indicators to generate a true quantitative confidence score."""
     if state.daily_ai_calls >= 500:
         return "BALANCED", 50, "Groq limit reached. Defaulting to standard allocation."
 
     try:
-        # Ground the AI with live pricing for the target asset
-        live_price = yf.Ticker(symbol).fast_info["lastPrice"]
+        ticker = yf.Ticker(symbol)
+        live_price = ticker.fast_info["lastPrice"]
+
+        # --- NEW: Technical Analysis Engine ---
+        history = ticker.history(period="60d")
+        close_prices = history["Close"]
+
+        # Calculate 50-Day Moving Average
+        sma_50 = close_prices.rolling(window=50).mean().iloc[-1]
+
+        # Calculate 14-Day RSI
+        delta = close_prices.diff()
+        gains = delta.where(delta > 0, 0).rolling(window=14).mean()
+        losses = -delta.where(delta < 0, 0).rolling(window=14).mean()
+        rs = gains / losses
+        rsi = (100 - (100 / (1 + rs))).iloc[-1]
+        # --------------------------------------
+
         base_profile = (
             state.custom_watchlist.get(symbol, "GROWTH")
             if isinstance(state.custom_watchlist, dict)
@@ -508,11 +525,14 @@ def evaluate_reinvestment_confidence(symbol, state):
 
         prompt = f"""Evaluate deploying fresh harvested capital into {symbol}.
 Current Price: ${live_price:.2f}
+50-Day Moving Average: ${sma_50:.2f}
+14-Day RSI: {rsi:.1f}
 Default Profile: {base_profile} (Standard Allocation Mode: {default_mode})
 
+Analyze the technicals: An RSI below 30 is oversold (prime buying), above 70 is overbought (terrible buying).
 You MUST respond using EXACTLY this 2-line format:
 REINVEST_MODE: [MOMENTUM, BALANCED, or DIVIDEND] | CONFIDENCE: [1-100]
-REASONING: [2-3 brief sentences explaining if this is a high-conviction entry point based strictly on the current price context]"""
+REASONING: [2-3 brief sentences explaining if this is a high-conviction entry point based strictly on the RSI and SMA context]"""
 
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -522,7 +542,6 @@ REASONING: [2-3 brief sentences explaining if this is a high-conviction entry po
         ai_text = chat_completion.choices[0].message.content.strip()
         state.daily_ai_calls += 1
 
-        # Parse the custom response template
         first_line = ai_text.split("\n")[0]
         mode_part, conf_part = first_line.split("|")
         chosen_mode = mode_part.split(":")[1].strip().upper()
@@ -770,43 +789,41 @@ def master_patrol(state):
                         )
 
                         if should_sell:
-                            harvest_candidates.append(p)
-                            send_ntfy(
-                                f"✂️ {symbol} Profit Harvest (Score: {confidence}/100)",
-                                f"Decision: HARVEST.\nReason: {reason}",
+                            # 1. Ask the AI where to move the money
+                            advice_conf, advice_text = get_reinvestment_advice(
+                                [p], state.custom_watchlist, state
                             )
 
-                            # --- NEW: VET THE REINVESTMENT TARGET BEFORE ALLOCATING ---
-                            # Example logic: Rotate out of current symbol into a specific target
-                            target_pool = "MU" if symbol != "MU" else "TSM"
+                            # 2. Package the entire strategy into a pending task
+                            rotation_task = {
+                                "source": symbol,
+                                "amount": profit,
+                                "harvest_conf": confidence,
+                                "harvest_reason": reason,
+                                "advice_conf": advice_conf,
+                                "advice_text": advice_text,
+                                "timestamp": get_timestamp(),
+                            }
 
-                            reinvest_mode, reinvest_conf, reinvest_reason = (
-                                evaluate_reinvestment_confidence(target_pool, state)
-                            )
+                            # Ensure the queue exists before appending
+                            if not hasattr(state, "pending_rotations"):
+                                state.pending_rotations = []
+
+                            state.pending_rotations.append(rotation_task)
 
                             log_event(
                                 state,
-                                f"🔄 REINVESTMENT SIGNAL -> {target_pool}: {reinvest_mode} (Score: {reinvest_conf}/100)",
+                                f"⏳ Rotation queued for approval: {symbol} (+£{profit:.2f})",
                             )
-
-                            # Protective Gate: Only auto-reinvest if AI confidence is high
-                            if reinvest_conf >= 75:
-                                send_ntfy(
-                                    f"💰 Reinvesting Capital into {target_pool} ({reinvest_conf}/100)",
-                                    f"Strategy: {reinvest_mode}\nReason: {reinvest_reason}",
-                                )
-                                # Place your Trading 212 execution trigger here in the future
-                            else:
-                                send_ntfy(
-                                    f"⚠️ Reinvestment Parked to Cash ({reinvest_conf}/100)",
-                                    f"Confidence too low to force buy into {target_pool}. Capital safely parked. Reason: {reinvest_reason}",
-                                )
+                            send_ntfy(
+                                f"⏳ Action Required: {symbol} Ready",
+                                f"AI wants to harvest £{profit:.2f} and rotate it (Score: {confidence}/100).\nOpen Dashboard to Review & Approve.",
+                            )
                         else:
                             send_ntfy(
                                 f"💎 {symbol} Diamond Hands (Score: {confidence}/100)",
                                 f"Decision: HOLD.\nReason: {reason}",
                             )
-
                     # Only generate reinvestment advice for the stocks we actually decided to sell
                     if harvest_candidates:
                         # Unpack the confidence score here so it doesn't crash
@@ -1144,6 +1161,64 @@ try:
         st.info("The ledger is currently empty. Waiting for the first AI decision...")
 except Exception as e:
     st.error(f"Could not load ledger: {e}")
+
+st.markdown("---")
+st.markdown("### ⏳ Pending AI Executions (Awaiting Approval)")
+st.caption("Review and authorize capital rotations drafted by the Auto-Harvester.")
+
+if not hasattr(shared_state, "pending_rotations"):
+    shared_state.pending_rotations = []
+
+if not shared_state.pending_rotations:
+    st.info("No pending actions. The AI is watching the market.")
+else:
+    for i, task in enumerate(shared_state.pending_rotations):
+        with st.expander(
+            f"Rotate £{task['amount']:.2f} from {task['source']}", expanded=True
+        ):
+            st.write(
+                f"**1. Harvest Rationale** (Confidence: {task['harvest_conf']}/100):"
+            )
+            st.caption(f"{task['harvest_reason']}")
+
+            st.write(
+                f"**2. Reinvestment Strategy** (Confidence: {task['advice_conf']}/100):"
+            )
+            st.caption(f"{task['advice_text']}")
+
+            st.caption(f"Drafted: {task['timestamp']}")
+
+            c1, c2 = st.columns(2)
+            if c1.button(
+                "✅ Approve & Execute", key=f"approve_{i}", use_container_width=True
+            ):
+                log_event(
+                    shared_state,
+                    f"USER APPROVED: Harvested £{task['amount']:.2f} from {task['source']}. Reinvesting.",
+                )
+                send_ntfy(
+                    "✅ Execution Confirmed",
+                    f"Order placed to harvest {task['source']} and reallocate.",
+                )
+
+                # --- FUTURE UPGRADE: Insert your T212 API BUY/SELL commands here ---
+
+                shared_state.pending_rotations.pop(i)
+                st.rerun()
+
+            if c2.button(
+                "❌ Reject & Hold Position", key=f"reject_{i}", use_container_width=True
+            ):
+                log_event(
+                    shared_state,
+                    f"USER REJECTED: Rotation for {task['source']} cancelled.",
+                )
+                send_ntfy(
+                    "❌ Execution Cancelled",
+                    f"Profits from {task['source']} retained in current position.",
+                )
+                shared_state.pending_rotations.pop(i)
+                st.rerun()
 
 st.markdown("---")
 st.subheader("🖥️ System Logs & Live Events")
