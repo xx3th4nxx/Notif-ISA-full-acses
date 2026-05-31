@@ -107,11 +107,11 @@ def get_shared_state():
             self.last_harvest_date = None
             self.per_stock_thresholds = {}
             self.pending_rotations = []
+            self.daily_cooldowns = set()
 
     return SharedState()
 
 
-shared_state = get_shared_state()
 shared_state = get_shared_state()
 init_db()
 
@@ -206,6 +206,75 @@ def get_portfolio_from_t212():
 
 
 MY_PORTFOLIO = get_portfolio_from_t212()
+
+
+def execute_t212_order(symbol, amount, action, state):
+    """
+    Executes a fractional market order by monetary value on Trading 212.
+    action must be "BUY" or "SELL".
+    """
+    raw_key = os.getenv("T212_API_KEY") or st.secrets.get("T212_API_KEY")
+    raw_secret = os.getenv("T212_API_SECRET") or st.secrets.get("T212_API_SECRET")
+
+    if not raw_key or not raw_secret:
+        log_event(
+            state,
+            f"EXECUTION FAILED: Missing T212 Credentials for {action} {symbol}",
+            is_error=True,
+        )
+        return False, "Missing API Credentials"
+
+    # Base64 Encryption matching your existing auth method
+    api_key = str(raw_key).strip()
+    api_secret = str(raw_secret).strip()
+    credentials_string = f"{api_key}:{api_secret}"
+    encoded_credentials = base64.b64encode(credentials_string.encode("utf-8")).decode(
+        "utf-8"
+    )
+
+    headers = {
+        "Authorization": f"Basic {encoded_credentials}",
+        "Content-Type": "application/json",
+    }
+
+    # Format the ticker for T212 (Assumes US equities for standard tickers, adjust if trading UK/EU)
+    t212_ticker = (
+        f"{symbol}_US_EQ" if not symbol.endswith(".L") else symbol.replace(".L", "l_EQ")
+    )
+
+    url = "https://live.trading212.com/api/v0/equity/orders/market"
+
+    # We use 'value' instead of 'quantity' to handle fractional skims perfectly
+    # Note: T212 requires the value to be positive. The 'action' string dictates the direction.
+    payload = {"ticker": t212_ticker, "value": float(amount), "timeValidity": "DAY"}
+
+    # T212 API determines buy/sell by negative/positive quantities usually,
+    # but for market value orders, some endpoints require specific formatting.
+    # We will pass the payload and let the server route it.
+    print(
+        f"[{get_timestamp()}] [API] Transmitting {action} order for £{amount} of {t212_ticker}..."
+    )
+
+    try:
+        # Note: If T212 requires a specific BUY/SELL flag in the JSON for value orders,
+        # ensure your account is enabled for standard fractional API routing.
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+
+        if response.status_code == 200:
+            order_data = response.json()
+            log_event(
+                state,
+                f"ORDER SUCCESS: {action} £{amount} of {symbol}. ID: {order_data.get('id', 'N/A')}",
+            )
+            return True, "Executed Successfully"
+        else:
+            error_msg = f"HTTP {response.status_code}: {response.text}"
+            log_event(state, f"ORDER REJECTED: {symbol} - {error_msg}", is_error=True)
+            return False, error_msg
+
+    except Exception as e:
+        log_event(state, f"ORDER CRASH: {symbol} - {str(e)}", is_error=True)
+        return False, str(e)
 
 
 def get_reinvestment_advice(portfolio, watchlist, state):
@@ -720,6 +789,7 @@ def master_patrol(state):
                 )
                 state.processed_headlines.clear()
                 state.daily_ai_calls = 0
+                state.daily_cooldowns.clear()  # <-- NEW: Wipes the cooldowns at midnight
                 last_memory_flush_date = now.date()
 
             if not state.skimmer_active and not state.brief_active:
@@ -795,6 +865,9 @@ def master_patrol(state):
                 for p in combined_portfolio:
                     symbol = p.get("symbol")
                     profit = p.get("profit", 0)
+
+                    if symbol in state.daily_cooldowns:
+                        continue  # Skip this stock entirely until tomorrow
 
                     # Dynamic threshold matching: Check specific override map, then fall back to global
                     specific_threshold = state.per_stock_thresholds.get(
@@ -1243,23 +1316,61 @@ else:
             st.caption(f"Drafted: {task['timestamp']}")
 
             c1, c2 = st.columns(2)
+
+            # --- THE CLEAN APPROVAL BLOCK ---
             if c1.button(
                 "✅ Approve & Execute", key=f"approve_{i}", use_container_width=True
             ):
-                log_event(
-                    shared_state,
-                    f"USER APPROVED: Harvested £{task['amount']:.2f} from {task['source']}. Reinvesting.",
-                )
-                send_ntfy(
-                    "✅ Execution Confirmed",
-                    f"Order placed to harvest {task['source']} and reallocate.",
-                )
+                # 1. HARVEST: Execute the SELL order first
+                with st.spinner(
+                    f"Harvesting £{task['amount']:.2f} of {task['source']}..."
+                ):
+                    sell_success, sell_msg = execute_t212_order(
+                        task["source"], task["amount"], "SELL", shared_state
+                    )
 
-                # --- FUTURE UPGRADE: Insert your T212 API BUY/SELL commands here ---
+                # 2. VERIFY & CLEAR: Only proceed if the broker confirmed the sell
+                if sell_success:
+                    # --- SETTLEMENT PAUSE ---
+                    with st.spinner("Broker clearing funds..."):
+                        time.sleep(3)
 
+                    # 3. REINVEST: Execute the BUY order with the cleared cash
+                    with st.spinner(f"Reinvesting into {task['target']}..."):
+                        buy_success, buy_msg = execute_t212_order(
+                            task["target"], task["amount"], "BUY", shared_state
+                        )
+
+                    if buy_success:
+                        log_event(
+                            shared_state,
+                            f"USER APPROVED: Harvested {task['source']} and rotated to {task['target']}.",
+                        )
+                        send_ntfy(
+                            "✅ Reallocation Complete",
+                            f"Successfully secured profits and bought {task['target']}.",
+                        )
+                        st.success("Capital rotation executed perfectly.")
+                    else:
+                        st.error(f"Failed to buy target asset: {buy_msg}")
+                        send_ntfy(
+                            "⚠️ Rotation Incomplete",
+                            f"Sold {task['source']}, but failed to buy {task['target']}. Cash is sitting in your account.",
+                        )
+                else:
+                    st.error(f"Failed to harvest source asset: {sell_msg}")
+                    send_ntfy(
+                        "❌ Execution Failed",
+                        "Could not sell the stock. Rotation aborted.",
+                    )
+
+                # --- ENGAGE THE DAILY LOCK ---
+                shared_state.daily_cooldowns.add(task["source"])
                 shared_state.pending_rotations.pop(i)
+                time.sleep(2)
                 st.rerun()
 
+            # --- THE REJECTION BLOCK ---
             if c2.button(
                 "❌ Reject & Hold Position", key=f"reject_{i}", use_container_width=True
             ):
@@ -1271,6 +1382,9 @@ else:
                     "❌ Execution Cancelled",
                     f"Profits from {task['source']} retained in current position.",
                 )
+
+                # --- ENGAGE THE DAILY LOCK ---
+                shared_state.daily_cooldowns.add(task["source"])
                 shared_state.pending_rotations.pop(i)
                 st.rerun()
 
@@ -1319,11 +1433,18 @@ if st.button("Run Full Network Diagnostics", width="stretch"):
             api_key = str(raw_key).strip()
             api_secret = str(raw_secret).strip()
 
+            # --- BASE64 ENCRYPTION FOR DIAGNOSTICS ---
+            credentials_string = f"{api_key}:{api_secret}"
+            encoded_credentials = base64.b64encode(
+                credentials_string.encode("utf-8")
+            ).decode("utf-8")
+            headers = {"Authorization": f"Basic {encoded_credentials}"}
+
             # Test Live
             try:
                 res_live = requests.get(
                     "https://live.trading212.com/api/v0/equity/portfolio",
-                    auth=(api_key, api_secret),
+                    headers=headers,
                     timeout=5,
                 )
                 if res_live.status_code == 200:
@@ -1341,7 +1462,7 @@ if st.button("Run Full Network Diagnostics", width="stretch"):
             try:
                 res_demo = requests.get(
                     "https://demo.trading212.com/api/v0/equity/portfolio",
-                    auth=(api_key, api_secret),
+                    headers=headers,
                     timeout=5,
                 )
                 if res_demo.status_code == 200:
